@@ -54,8 +54,18 @@ final class Profile {
 
     boolean hasFec() { return !speederArgs.isEmpty(); }
 
-    /** One line for lists: what the tunnel is and where it goes. */
-    String summary() { return (hasFec() ? "FEC " + (fec.isEmpty() ? "" : fec + " · ") : "Direct · ") + server; }
+    /** "FEC" or "Direct": how this profile reaches the server. */
+    String modeLabel() { return hasFec() ? "FEC" : "Direct"; }
+
+    /** One line for lists, next to the mode badge: the FEC setting (if any) and where the tunnel goes. */
+    String detail() { return (hasFec() && !fec.isEmpty() ? "FEC " + fec + " · " : "") + server; }
+
+    /** Longer text for the import confirmation. */
+    String describe() {
+        return hasFec()
+                ? "Mode: FEC (WireGuard through speederv2)\nFEC setting: " + (fec.isEmpty() ? "default" : fec) + "\nServer: " + server
+                : "Mode: Direct (plain WireGuard, no FEC)\nServer: " + server;
+    }
 
     private static String cfgValue(String cfg, String key) {
         java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?mi)^\\s*" + key + "\\s*=\\s*(.+?)\\s*$").matcher(cfg);

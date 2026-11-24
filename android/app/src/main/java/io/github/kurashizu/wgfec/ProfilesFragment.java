@@ -71,7 +71,8 @@ public class ProfilesFragment extends Fragment {
     private void bind(VH h, Store.Item it) {
         Profile p = it.parsed();
         h.v.name.setText(it.name);
-        h.v.info.setText(p == null ? "Not valid" : p.summary());
+        h.v.info.setText(p == null ? "This profile is not valid." : p.detail());
+        Ui.modeBadge(h.v.mode, p);
         boolean active = it.id.equals(activeId);
         h.v.badge.setVisibility(active ? View.VISIBLE : View.GONE);
         h.v.card.setStrokeWidth(active ? (int) (2 * getResources().getDisplayMetrics().density) : 0);

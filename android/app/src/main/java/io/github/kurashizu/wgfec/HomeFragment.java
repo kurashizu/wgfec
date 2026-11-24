@@ -58,7 +58,7 @@ public class HomeFragment extends Fragment {
         switch (s) {
             case CONNECTED:
                 colRes = R.color.status_on; title = "Connected";
-                sub = "Up for " + Fmt.duration(System.currentTimeMillis() - TunnelService.since);
+                sub = "Up for " + Fmt.duration(System.currentTimeMillis() - TunnelService.since) + (TunnelService.profileMode.isEmpty() ? "" : " · " + TunnelService.profileMode);
                 if (TunnelService.handshake == 0 && System.currentTimeMillis() - TunnelService.since > 12000)
                     sub = "No reply from the server yet. Check the log.";
                 break;
@@ -99,7 +99,8 @@ public class HomeFragment extends Fragment {
         if (it != null) {
             b.profName.setText(it.name);
             Profile p = it.parsed();
-            b.profInfo.setText(p == null ? "This profile is not valid." : p.summary());
+            b.profInfo.setText(p == null ? "This profile is not valid." : p.detail());
+            Ui.modeBadge(b.profMode, p);
         }
         b.change.setEnabled(!TunnelService.running());
 

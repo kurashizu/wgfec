@@ -38,6 +38,7 @@ public class TunnelService extends Service {
     static volatile St state = St.STOPPED;
     static volatile String error = "";
     static volatile String profileName = "";
+    static volatile String profileMode = "";
     static volatile long since, rx, tx, handshake;
     static final CopyOnWriteArrayList<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
 
@@ -87,6 +88,8 @@ public class TunnelService extends Service {
             if (running()) return START_NOT_STICKY;
             if (it == null) { state = St.ERROR; error = "No profile selected."; poke(); stopSelf(); return START_NOT_STICKY; }
             profileName = it.name;
+            Profile pm = it.parsed();
+            profileMode = pm == null ? "" : pm.modeLabel();
             goForeground();
             stopping = false;
             setState(St.CONNECTING, null);
@@ -99,7 +102,8 @@ public class TunnelService extends Service {
     }
 
     private Notification buildNotification() {
-        String text = state == St.CONNECTED ? "Connected · " + profileName : "Connecting · " + profileName;
+        String mode = profileMode.isEmpty() ? "" : " · " + profileMode;
+        String text = (state == St.CONNECTED ? "Connected · " : "Connecting · ") + profileName + mode;
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, TunnelService.class).setAction(ACTION_STOP), PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, "tunnel")

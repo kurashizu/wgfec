@@ -50,7 +50,7 @@ final class Importer {
         final String finalText = profileText;
         new MaterialAlertDialogBuilder(a)
                 .setTitle("Add profile")
-                .setMessage(p.summary())
+                .setMessage(p.describe())
                 .setView(wrap)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Add", (d, w) -> {
