@@ -1,0 +1,19 @@
+[Unit]
+Description=WireGuard wg0 via BoringTun
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WG_QUICK_USERSPACE_IMPLEMENTATION=boringtun-cli
+Environment=WG_LOG_FILE=/var/log/boringtun-wg0.log
+Environment=WG_LOG_LEVEL=info
+Environment=WG_SUDO=true
+Environment=WG_THREADS=1
+ExecStart=/usr/local/bin/wg-quick up wg0
+ExecStop=/usr/local/bin/wg-quick down wg0
+
+[Install]
+WantedBy=multi-user.target

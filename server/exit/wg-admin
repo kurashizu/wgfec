@@ -1,0 +1,284 @@
+#!/usr/bin/python3
+"""wg-admin: whitelisted admin operations for the WireGuard service on this host.
+
+Usage:  wg-admin status
+        wg-admin config
+        wg-admin service start|stop|restart
+        wg-admin speeder-set KEY=VALUE ...      (FEC settings, see SPEEDER_FIELDS)
+        wg-admin logs wg-service|speeder|faketcp|web-ui [LINES]
+Output is JSON on stdout. Errors: {"error": "..."} with exit code 1.
+Only the fixed unit/file names below can be touched; nothing from argv is used
+in a path or a command except the validated action / source keywords.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+UNIT = "wg-quick@wg0.service"
+WEB_UNIT = "wg-web.service"
+IFACE = "wg0"
+CONF = "/etc/wireguard/wg0.conf"
+PUBKEY_FILE = "/etc/wireguard/publickey"
+WG = "/usr/bin/wg"
+SPEEDER_UNIT = "wg-speeder.service"
+U2R_UNITS = ("wg-u2r.service", "wg-u2r-fec.service")
+LOCKFILE = "/run/wg-admin.lock"
+ENDPOINT = "wg.example.com:51820"   # CHANGE ME: public host:port clients connect to (server/scripts/configure.sh sets it)
+POOL_SIZE = 155                      # 10.99.0.100 - 10.99.0.254
+MAX_LINES, DEFAULT_LINES = 500, 100
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+SECRET_RE = re.compile(r"^(\s*(?:PrivateKey|PresharedKey)\s*=).*$", re.M)
+KEYARG_RE = re.compile(r"(\bkey=|\s-k\s+)\S+")          # udp2raw / speederv2 shared keys
+
+
+class Err(Exception):
+    pass
+
+
+def run(cmd, timeout=20, check=True):
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Err("%s timed out" % os.path.basename(cmd[0]))
+    if check and p.returncode != 0:
+        raise Err("%s failed: %s" % (os.path.basename(cmd[0]), (p.stderr or p.stdout).strip()[:200]))
+    return p.stdout
+
+
+def unit_state(unit):
+    out = run(["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState",
+               "-p", "ActiveEnterTimestamp", "-p", "UnitFileState"], check=False)
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return {"active": kv.get("ActiveState", "unknown"), "sub": kv.get("SubState", ""),
+            "since": kv.get("ActiveEnterTimestamp", ""), "enabled": kv.get("UnitFileState", "")}
+
+
+def cmd_status():
+    res = {"now": int(time.time()), "endpoint": ENDPOINT,
+           "service": unit_state(UNIT), "web": unit_state(WEB_UNIT)}
+    res["implementation"] = "WireGuard kernel module"
+    res["speeder"] = unit_state(SPEEDER_UNIT)
+
+    iface = {"up": False, "address": "", "mtu": None, "listen_port": None, "public_key": ""}
+    link = run(["ip", "-o", "link", "show", IFACE], check=False)
+    if link.strip():
+        iface["up"] = ("UP" in link.split("<")[1].split(">")[0].split(",")) if "<" in link else False
+        m = re.search(r"mtu (\d+)", link)
+        iface["mtu"] = int(m.group(1)) if m else None
+        a = re.search(r"inet (\S+)", run(["ip", "-o", "-4", "addr", "show", "dev", IFACE], check=False))
+        iface["address"] = a.group(1) if a else ""
+    try:
+        iface["public_key"] = open(PUBKEY_FILE).read().strip()
+    except OSError:
+        pass
+
+    peers = {"total": 0, "connected": 0, "managed": 0, "pool_size": POOL_SIZE}
+    traffic = {"rx": 0, "tx": 0}
+    dump = run([WG, "show", IFACE, "dump"], check=False).splitlines()
+    if dump:
+        head = dump[0].split("\t")
+        if len(head) > 2 and head[2].isdigit():
+            iface["listen_port"] = int(head[2])
+        for line in dump[1:]:
+            f = line.split("\t")
+            if len(f) < 7:
+                continue
+            peers["total"] += 1
+            traffic["rx"] += int(f[5])
+            traffic["tx"] += int(f[6])
+            hs = int(f[4])                          # BoringTun: seconds ago; kernel: epoch
+            ago = None if hs <= 0 else (max(0, int(time.time()) - hs) if hs > 10 ** 9 else hs)
+            if ago is not None and ago < 180:
+                peers["connected"] += 1
+    try:
+        peers["managed"] = len(re.findall(r"^# BEGIN peer:", open(CONF).read(), re.M))
+    except OSError:
+        pass
+    res.update({"interface": iface, "peers": peers, "traffic": traffic})
+    return res
+
+
+def cmd_config():
+    with open(CONF) as f:
+        text = f.read()
+    return {"config": SECRET_RE.sub(r"\1 <hidden>", text)}
+
+
+def cmd_service(action):
+    if action not in ("start", "stop", "restart"):
+        raise Err("invalid action")
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another service operation is in progress")
+        sys.stderr.write("wg-admin: service %s requested\n" % action)
+        out = subprocess.run(["systemctl", action, UNIT], capture_output=True, text=True,
+                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, timeout=90)
+        time.sleep(1)
+        st = unit_state(UNIT)
+        if out.returncode != 0:
+            raise Err("systemctl %s failed (unit is now %s): %s" %
+                      (action, st["active"], (out.stderr or out.stdout).strip()[:200]))
+        return {"action": action, "service": st}
+
+
+SPEEDER_ENV = "/etc/wg-speeder/speeder.env"
+SPEEDER_PREV = "/etc/wg-speeder/speeder.env.prev"
+
+
+def _int_in(lo, hi):
+    def check(v):
+        if not re.fullmatch(r"[0-9]{1,6}", v) or not lo <= int(v) <= hi:
+            raise Err("value out of range (%d-%d)" % (lo, hi))
+        return str(int(v))
+    return check
+
+
+def _fec(v):
+    if len(v) > 200 or not re.fullmatch(r"[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*", v):
+        raise Err("FEC groups must look like 1:3,2:4,10:10 (data:parity, at most 200 characters)")
+    tiers = v.split(",")
+    if len(tiers) > 24:
+        raise Err("at most 24 FEC tiers")
+    last = 0
+    for t in tiers:
+        x, y = (int(n) for n in t.split(":"))
+        if x < 1 or x <= last:
+            raise Err("the data numbers must start at 1 or more and keep increasing")
+        if x + y > 255:
+            raise Err("data + parity must be at most 255 in every group")
+        last = x
+    return v
+
+
+SPEEDER_FIELDS = {
+    "SPEEDER_FEC": _fec, "SPEEDER_FEC_UP": _fec,
+    "SPEEDER_TIMEOUT": _int_in(0, 1000), "SPEEDER_TIMEOUT_UP": _int_in(0, 1000),
+    "SPEEDER_INTERVAL": _int_in(0, 1000), "SPEEDER_INTERVAL_UP": _int_in(0, 1000),
+    "SPEEDER_MTU": _int_in(576, 1500), "SPEEDER_DECODE_BUF": _int_in(300, 20000), "SPEEDER_SOCK_BUF": _int_in(10, 10240),
+}
+
+
+def _speeder_restarts():
+    out = run(["systemctl", "show", SPEEDER_UNIT, "-p", "NRestarts", "--value"], check=False).strip()
+    return int(out) if out.isdigit() else 0
+
+
+def cmd_speeder_set(args):
+    if not args or len(args) > len(SPEEDER_FIELDS):
+        raise Err("nothing to change")
+    new = {}
+    for a in args:
+        k, sep, v = a.partition("=")
+        if not sep or k not in SPEEDER_FIELDS or k in new:
+            raise Err("unknown or repeated setting")
+        new[k] = SPEEDER_FIELDS[k](v)
+    try:
+        with open(SPEEDER_ENV) as f:
+            old_text = f.read()
+        st = os.stat(SPEEDER_ENV)
+    except OSError:
+        raise Err("the FEC service is not configured on this host")
+    lines, seen = [], set()
+    for ln in old_text.splitlines():
+        k = ln.split("=", 1)[0].strip()
+        if "=" in ln and k in new:
+            lines.append("%s=%s" % (k, new[k]))
+            seen.add(k)
+        else:
+            lines.append(ln)
+    for k in new:
+        if k not in seen:
+            lines.append("%s=%s" % (k, new[k]))
+
+    def write(text):
+        tmp = SPEEDER_ENV + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chown(tmp, st.st_uid, st.st_gid)
+        os.chmod(tmp, st.st_mode & 0o777)
+        os.replace(tmp, SPEEDER_ENV)
+
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another operation is in progress")
+        sys.stderr.write("wg-admin: speeder-set %s\n" % ",".join(sorted(new)))
+        write_prev = open(SPEEDER_PREV, "w")
+        os.chmod(SPEEDER_PREV, st.st_mode & 0o777)
+        os.chown(SPEEDER_PREV, st.st_uid, st.st_gid)
+        write_prev.write(old_text)
+        write_prev.close()
+        before = _speeder_restarts()
+        write("\n".join(lines) + "\n")
+        run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+        time.sleep(4)                       # longer than RestartSec: a crash loop shows up as a restart count
+        ok = run(["systemctl", "is-active", SPEEDER_UNIT], check=False).strip() == "active" and _speeder_restarts() == before
+        if not ok:
+            write(old_text)
+            run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+            raise Err("the FEC service would not run with these settings; the previous settings were restored")
+        return {"ok": True, "applied": new, "service": unit_state(SPEEDER_UNIT)}
+
+
+def cmd_logs(source, lines):
+    n = DEFAULT_LINES if lines is None else lines
+    n = max(10, min(MAX_LINES, n))
+    if source == "wg-service":
+        text = run(["journalctl", "-u", UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "web-ui":
+        text = run(["journalctl", "-u", WEB_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "speeder":
+        text = run(["journalctl", "-u", SPEEDER_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "faketcp":
+        args = ["journalctl", "-n", str(n), "--no-pager", "-o", "short-iso"]
+        for u in U2R_UNITS:
+            args += ["-u", u]
+        text = run(args, check=False)
+    else:
+        raise Err("invalid log source")
+    text = KEYARG_RE.sub(r"\1<hidden>", SECRET_RE.sub(r"\1 <hidden>", ANSI_RE.sub("", text)))
+    return {"source": source, "lines": text.splitlines()[-n:]}
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        raise Err("must run as root")
+    a = argv[1:]
+    if a == ["status"]:
+        return cmd_status()
+    if a == ["config"]:
+        return cmd_config()
+    if len(a) == 2 and a[0] == "service":
+        return cmd_service(a[1])
+    if a and a[0] == "logs" and len(a) in (2, 3):
+        lines = None
+        if len(a) == 3:
+            if not a[2].isdigit():
+                raise Err("invalid line count")
+            lines = int(a[2])
+        return cmd_logs(a[1], lines)
+    if a and a[0] == "speeder-set":
+        return cmd_speeder_set(a[1:])
+    raise Err("usage: wg-admin status | config | service start|stop|restart | speeder-set K=V ... | logs SOURCE [N]")
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(main(sys.argv), ensure_ascii=False))
+    except Err as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": "internal error: %s" % type(e).__name__}))
+        sys.exit(2)

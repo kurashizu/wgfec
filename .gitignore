@@ -1,0 +1,19 @@
+# secrets and local state: never commit these
+*.jks
+*.keystore
+keystore.properties
+local.properties
+config.json
+speeder.env
+*.pem
+# build output
+android/build/
+android/.gradle/
+android/app/build/
+toolchain/
+__pycache__/
+*.pyc
+# test results
+results.json
+report.txt
+logs/

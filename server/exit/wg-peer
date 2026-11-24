@@ -1,0 +1,441 @@
+#!/usr/bin/python3
+"""wg-peer: add / remove / list WireGuard peers on wg0 (live + persistent).
+
+Usage:  wg-peer list
+        wg-peer add NAME [IP]      # IP optional: 10.99.0.2 - 10.99.0.254, else next free in the pool
+        wg-peer remove NAME
+Output is always JSON on stdout. Errors: {"error": "..."} and exit code 1.
+
+Safety design:
+  * everything runs under an exclusive flock
+  * wg0.conf is only ever replaced atomically, after `wg-quick strip` validated it
+  * the live interface is changed with `wg set` (never restarts wg0)
+  * a failed step rolls back the earlier ones; the previous conf is backed up
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+IFACE = "wg0"
+CONF = "/etc/wireguard/wg0.conf"
+WG = "/usr/bin/wg"
+WGQUICK = "/usr/bin/wg-quick"
+LOCKFILE = "/run/wg-peer.lock"
+BACKUP_DIR = "/var/lib/wg-peer/backups"
+MODES_DIR = "/var/lib/wg-peer/modes"    # how each device connects (direct, speeder, faketcp, ...), so its config opens the same way
+VIA_MODES = ("direct", "speeder", "faketcp", "speeder-faketcp")
+KEYS_DIR = "/var/lib/wg-peer/keys"      # device private keys, so a config can be shown again (root only, 0600)
+KEEP_BACKUPS = 20
+PREFIX = "10.99.0."
+PREFIX6 = "fd51:7c3b:9e12::"       # ULA overlay; device 10.99.0.N gets fd51:7c3b:9e12::N (N in hex)
+POOL = range(100, 255)            # 10.99.0.100 - 10.99.0.254
+ENDPOINT = "wg.example.com:51820"   # CHANGE ME: public host:port clients connect to (server/scripts/configure.sh sets it)
+CLIENT_ALLOWED = "0.0.0.0/0, ::/0"      # full tunnel: this server is the internet exit
+CLIENT_DNS = "1.1.1.1, 8.8.8.8, 2606:4700:4700::1111, 2001:4860:4860::8888"
+CLIENT_MTU = 1380
+
+NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+BLOCK_RE = re.compile(
+    r"^# BEGIN peer:([A-Za-z0-9_.-]+)\n(.*?)^# END peer:\1\n", re.M | re.S)
+
+
+class Err(Exception):
+    pass
+
+
+def run(cmd, inp=None):
+    env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+    try:
+        p = subprocess.run(cmd, input=inp, capture_output=True, text=True,
+                           env=env, timeout=15)
+    except subprocess.TimeoutExpired:
+        raise Err("%s timed out" % os.path.basename(cmd[0]))
+    if p.returncode != 0:
+        raise Err("%s failed: %s" % (os.path.basename(cmd[0]),
+                                     (p.stderr or p.stdout).strip()[:200]))
+    return p.stdout
+
+
+def read_conf():
+    with open(CONF) as f:
+        return f.read()
+
+
+def v6_of(ip):
+    return "%s%x" % (PREFIX6, int(ip.rsplit(".", 1)[1]))
+
+
+def managed_peers(conf):
+    out = {}
+    for m in BLOCK_RE.finditer(conf):
+        body = m.group(2)
+        pk = re.search(r"^PublicKey\s*=\s*(\S+)", body, re.M)
+        ip = re.search(r"^AllowedIPs\s*=\s*([0-9.]+)/32", body, re.M)
+        al = re.search(r"^AllowedIPs\s*=\s*(.+)$", body, re.M)
+        if pk and ip and KEY_RE.match(pk.group(1)):
+            out[m.group(1)] = {"public_key": pk.group(1), "ip": ip.group(1),
+                               "allowed": al.group(1).replace(" ", "")}
+    return out
+
+
+def static_labels(conf):
+    """Hand-written peers look like '[Peer]\\n# label\\nPublicKey = X'."""
+    labels = {}
+    for m in re.finditer(r"^\[Peer\]\n#\s*(.+)\nPublicKey\s*=\s*(\S+)", conf, re.M):
+        labels[m.group(2)] = m.group(1).strip()
+    return labels
+
+
+def server_public_key(conf):
+    m = re.search(r"^PrivateKey\s*=\s*(\S+)", conf, re.M)
+    if not m:
+        raise Err("no PrivateKey in %s" % CONF)
+    pub = run([WG, "pubkey"], inp=m.group(1) + "\n").strip()
+    if not KEY_RE.match(pub):
+        raise Err("cannot determine server public key")
+    return pub
+
+
+def handshake_ago(value):
+    """Seconds since last handshake, or None if never.
+
+    The kernel module reports an epoch timestamp; BoringTun reports the number
+    of seconds elapsed instead. Tell them apart by magnitude.
+    """
+    if value <= 0:
+        return None
+    if value > 10 ** 9:
+        return max(0, int(time.time()) - value)
+    return value
+
+
+def live_peers():
+    out = run([WG, "show", IFACE, "dump"]).splitlines()
+    if not out:
+        raise Err("cannot read live state of %s" % IFACE)
+    peers = []
+    for line in out[1:]:
+        f = line.split("\t")
+        if len(f) < 7:
+            continue
+        peers.append({
+            "public_key": f[0],
+            "endpoint": "" if f[2] == "(none)" else f[2],
+            "allowed_ips": f[3],
+            "handshake_ago": handshake_ago(int(f[4])),
+            "rx": int(f[5]),
+            "tx": int(f[6]),
+        })
+    return peers
+
+
+def used_octets(conf, peers):
+    used = set(int(x) for x in re.findall(r"10\.99\.0\.(\d+)/", conf))
+    for p in peers:
+        used |= set(int(x) for x in re.findall(r"10\.99\.0\.(\d+)/", p["allowed_ips"]))
+    return used
+
+
+def tmp_path():
+    return os.path.join(os.path.dirname(CONF), ".wgpeer-new.conf")
+
+
+def stage_conf(text):
+    """Write text to a temp file next to CONF and validate it with wg-quick."""
+    tmp = tmp_path()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        run([WGQUICK, "strip", tmp])
+    except Err:
+        os.unlink(tmp)
+        raise Err("generated config failed validation; nothing was changed")
+    return tmp
+
+
+def backup_conf():
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    now = time.time()
+    stamp = "%s-%06d" % (time.strftime("%Y%m%d-%H%M%S", time.localtime(now)),
+                         int((now % 1) * 1000000))
+    dst = os.path.join(BACKUP_DIR, "wg0.conf.%s" % stamp)
+    fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(read_conf())
+    files = sorted(os.listdir(BACKUP_DIR))
+    for old in files[:-KEEP_BACKUPS]:
+        os.unlink(os.path.join(BACKUP_DIR, old))
+
+
+def client_config(priv, ip, server_pub):
+    return (
+        "[Interface]\n"
+        "PrivateKey = %s\n"
+        "Address = %s/32, %s/128\n"
+        "MTU = %d\n"
+        "DNS = %s\n"
+        "\n"
+        "[Peer]\n"
+        "PublicKey = %s\n"
+        "Endpoint = %s\n"
+        "AllowedIPs = %s\n"
+        "PersistentKeepalive = 25\n"
+    ) % (priv, ip, v6_of(ip), CLIENT_MTU, CLIENT_DNS, server_pub, ENDPOINT, CLIENT_ALLOWED)
+
+
+def key_path(name):
+    return os.path.join(KEYS_DIR, name)           # name is validated by check_name(): no path separators
+
+
+def save_key(name, priv):
+    os.makedirs(KEYS_DIR, mode=0o700, exist_ok=True)
+    os.chmod(KEYS_DIR, 0o700)
+    tmp = key_path(name) + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(priv + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, key_path(name))
+
+
+def mode_path(name):
+    return os.path.join(MODES_DIR, name)
+
+
+def read_mode(name):
+    try:
+        with open(mode_path(name)) as f:
+            v = f.read().strip()
+    except OSError:
+        return None
+    return v if v in VIA_MODES else None
+
+
+def save_mode(name, via):
+    os.makedirs(MODES_DIR, mode=0o700, exist_ok=True)
+    os.chmod(MODES_DIR, 0o700)
+    tmp = mode_path(name) + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(via + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, mode_path(name))
+
+
+def check_name(name):
+    if not isinstance(name, str) or not NAME_RE.match(name):
+        raise Err("invalid name (use letters, digits, '_', '-', '.', max 32 chars)")
+
+
+def cmd_list():
+    conf = read_conf()
+    mg = managed_peers(conf)
+    labels = static_labels(conf)
+    by_pub = dict((v["public_key"], k) for k, v in mg.items())
+    peers = live_peers()
+    res, seen = [], set()
+    for p in peers:
+        pk = p["public_key"]
+        seen.add(pk)
+        name = by_pub.get(pk)
+        ips = re.findall(r"10\.99\.0\.\d+(?=/32)", p["allowed_ips"])
+        res.append({
+            "name": name or labels.get(pk) or (pk[:8] + "..."),
+            "managed": name is not None,
+            "ip": ips[0] if ips else "",
+            "public_key": pk,
+            "endpoint": p["endpoint"],
+            "handshake_ago": p["handshake_ago"],
+            "rx": p["rx"], "tx": p["tx"],
+            "live": True,
+        })
+    for name, v in mg.items():          # in conf but not live: inconsistent
+        if v["public_key"] not in seen:
+            res.append({"name": name, "managed": True, "ip": v["ip"],
+                        "public_key": v["public_key"], "endpoint": "",
+                        "handshake_ago": None, "rx": 0, "tx": 0, "live": False})
+    for r in res:
+        r["has_config"] = bool(r["managed"] and os.path.isfile(key_path(r["name"])))
+        r["via"] = read_mode(r["name"]) if r["managed"] else None
+    res.sort(key=lambda r: (r["managed"], r["ip"]))
+    used = used_octets(conf, peers) | {1}
+    free = [n for n in POOL if n not in used]
+    return {"peers": res, "pool": "%s%d-%s%d" % (PREFIX, POOL[0], PREFIX, POOL[-1]),
+            "next_free": (PREFIX + str(free[0])) if free else None}
+
+
+def parse_static_ip(ip):
+    m = re.fullmatch(r"10\.99\.0\.([0-9]{1,3})", ip or "")
+    if not m or str(int(m.group(1))) != m.group(1):
+        raise Err("invalid address (expected 10.99.0.N)")
+    n = int(m.group(1))
+    if not 2 <= n <= 254:
+        raise Err("address out of range (10.99.0.2 - 10.99.0.254)")
+    return n
+
+
+def cmd_add(name, static_ip=None):
+    check_name(name)
+    wanted = parse_static_ip(static_ip) if static_ip is not None else None
+    conf = read_conf()
+    mg = managed_peers(conf)
+    if name in mg or name in static_labels(conf).values():
+        raise Err("name already exists")
+    server_pub = server_public_key(conf)
+    peers = live_peers()
+    used = used_octets(conf, peers) | {1}          # .1 is this server
+    if wanted is not None:
+        if wanted in used:
+            raise Err("address already in use")
+        ip = PREFIX + str(wanted)
+    else:
+        free = [n for n in POOL if n not in used]
+        if not free:
+            raise Err("address pool exhausted")
+        ip = PREFIX + str(free[0])
+
+    priv = run([WG, "genkey"]).strip()
+    pub = run([WG, "pubkey"], inp=priv + "\n").strip()
+    if not (KEY_RE.match(priv) and KEY_RE.match(pub)):
+        raise Err("key generation failed")
+
+    allowed = "%s/32, %s/128" % (ip, v6_of(ip))
+    block = ("# BEGIN peer:%s\n[Peer]\nPublicKey = %s\nAllowedIPs = %s\n"
+             "# END peer:%s\n") % (name, pub, allowed, name)
+    new = (conf if conf.endswith("\n") else conf + "\n") + "\n" + block
+
+    tmp = stage_conf(new)
+    try:
+        run([WG, "set", IFACE, "peer", pub, "allowed-ips", allowed.replace(" ", "")])
+    except Err:
+        os.unlink(tmp)
+        raise
+    try:
+        backup_conf()
+        os.replace(tmp, CONF)
+    except Exception as e:
+        try:
+            run([WG, "set", IFACE, "peer", pub, "remove"])
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        raise Err("could not persist config, rolled back: %s" % e)
+    try:
+        save_key(name, priv)
+        stored = True
+    except OSError:
+        stored = False
+    return {"name": name, "ip": ip, "public_key": pub,
+            "config": client_config(priv, ip, server_pub), "stored": stored}
+
+
+def cmd_remove(name):
+    check_name(name)
+    conf = read_conf()
+    mg = managed_peers(conf)
+    if name not in mg:
+        raise Err("no such managed device")
+    pub = mg[name]["public_key"]
+    new = BLOCK_RE.sub(lambda m: "" if m.group(1) == name else m.group(0), conf)
+    new = re.sub(r"\n{3,}", "\n\n", new).rstrip("\n") + "\n"
+    tmp = stage_conf(new)
+    try:
+        run([WG, "set", IFACE, "peer", pub, "remove"])
+    except Err:
+        os.unlink(tmp)
+        raise
+    try:
+        backup_conf()
+        os.replace(tmp, CONF)
+    except Exception as e:
+        try:
+            run([WG, "set", IFACE, "peer", pub, "allowed-ips", mg[name]["allowed"]])
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        raise Err("could not persist config, rolled back: %s" % e)
+    for p in (key_path(name), mode_path(name)):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+    return {"removed": name, "ip": mg[name]["ip"]}
+
+
+def cmd_setmode(name, via):
+    check_name(name)
+    if via not in VIA_MODES:
+        raise Err("invalid connection type")
+    if name not in managed_peers(read_conf()):
+        raise Err("no such managed device")
+    save_mode(name, via)
+    return {"name": name, "via": via}
+
+
+def cmd_show(name):
+    check_name(name)
+    conf = read_conf()
+    mg = managed_peers(conf)
+    if name not in mg:
+        raise Err("no such managed device")
+    try:
+        with open(key_path(name)) as f:
+            priv = f.read().strip()
+    except OSError:
+        raise Err("no saved config for this device (it was created before configs were stored); "
+                  "delete it and add it again to get a new one")
+    if not KEY_RE.match(priv):
+        raise Err("saved key is damaged; delete the device and add it again")
+    server_pub = server_public_key(conf)
+    return {"name": name, "ip": mg[name]["ip"], "config": client_config(priv, mg[name]["ip"], server_pub),
+            "via": read_mode(name)}
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        raise Err("must run as root")
+    extra = None
+    if len(argv) == 2 and argv[1] == "list":
+        action, arg = "list", None
+    elif len(argv) in (3, 4) and argv[1] == "add":
+        action, arg = "add", argv[2]
+        extra = argv[3] if len(argv) == 4 else None
+    elif len(argv) == 3 and argv[1] in ("remove", "show"):
+        action, arg = argv[1], argv[2]
+    elif len(argv) == 4 and argv[1] == "setmode":
+        action, arg, extra = "setmode", argv[2], argv[3]
+    else:
+        raise Err("usage: wg-peer list | add NAME [IP] | remove NAME | show NAME | setmode NAME MODE")
+    os.umask(0o077)
+    with open(LOCKFILE, "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        if action == "list":
+            return cmd_list()
+        if action == "add":
+            return cmd_add(arg, extra)
+        if action == "show":
+            return cmd_show(arg)
+        if action == "setmode":
+            return cmd_setmode(arg, extra)
+        return cmd_remove(arg)
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(main(sys.argv), ensure_ascii=False))
+    except Err as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+    except Exception as e:                      # never leak a traceback to the web layer
+        print(json.dumps({"error": "internal error: %s" % type(e).__name__}))
+        sys.exit(2)

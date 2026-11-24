@@ -1,0 +1,19 @@
+[Unit]
+Description=WireGuard admin web UI (localhost only)
+After=network.target boringtun-wg0.service
+
+[Service]
+User=wgweb
+Group=wgweb
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I /opt/wg-web/app.py
+Restart=on-failure
+RestartSec=3
+# NoNewPrivileges is intentionally not set: the app calls two whitelisted sudo commands.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/wireguard /var/lib/wg-peer /run
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,618 @@
+#!/usr/bin/python3
+"""wg-admin: whitelisted admin operations for the WireGuard service on this host.
+
+Usage:  wg-admin status
+        wg-admin config
+        wg-admin service start|stop|restart
+        wg-admin speeder-set KEY=VALUE ...      (FEC settings, see SPEEDER_FIELDS)
+        wg-admin forward list | add NAME PROTO PORT DEVICE_OR_LAN_IP TARGET_PORT SRC | remove NAME | enable NAME | disable NAME | reconcile
+        wg-admin logs wg-service|boringtun|speeder|faketcp|web-ui [LINES]
+Output is JSON on stdout. Errors: {"error": "..."} with exit code 1.
+Only the fixed unit/file names below can be touched; nothing from argv is used
+in a path or a command except the validated action / source keywords.
+"""
+import fcntl
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+UNIT = "boringtun-wg0.service"
+WEB_UNIT = "wg-web.service"
+SPEEDER_UNIT = "wg-speeder.service"
+U2R_UNITS = ("wg-u2r.service", "wg-u2r-fec.service")
+IFACE = "wg0"
+CONF = "/etc/wireguard/wg0.conf"
+PUBKEY_FILE = "/etc/wireguard/publickey"
+BORINGTUN_LOG = "/var/log/boringtun-wg0.log"
+WG = "/usr/local/bin/wg"
+BORINGTUN = "/usr/local/bin/boringtun-cli"
+LOCKFILE = "/run/wg-admin.lock"
+ENDPOINT = "wg.example.com:51820"   # CHANGE ME: public host:port clients connect to (server/scripts/configure.sh sets it)
+POOL_SIZE = 155                      # 10.99.0.100 - 10.99.0.254
+MAX_LINES, DEFAULT_LINES = 500, 100
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+SECRET_RE = re.compile(r"^(\s*(?:PrivateKey|PresharedKey)\s*=).*$", re.M)
+KEYARG_RE = re.compile(r"(\bkey=|\s-k\s+)\S+")          # udp2raw / speederv2 shared keys
+
+# ---- port forwarding: public port on this host -> a WireGuard device (nft table "ip portfwd") ----
+WG_PEER = "/usr/local/sbin/wg-peer"
+FWD_STATE = "/etc/wg-portfwd.json"
+FWD_NFT = "/etc/wg-portfwd.nft"
+FWD_TABLE = "portfwd"
+FWD_MAX = 32
+FWD_MIN_PORT = 1024
+FWD_RESERVED = frozenset([2222, 2019, 8443, 8787, 8788, 51820, 51821, 62932, 62935, 62936])
+FWD_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
+FWD_PROTOS = ("tcp", "udp", "both")
+FWD_IPV4_RE = re.compile(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$")
+
+
+class Err(Exception):
+    pass
+
+
+def run(cmd, timeout=20, check=True):
+    env = {"PATH": "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C"}
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Err("%s timed out" % os.path.basename(cmd[0]))
+    if check and p.returncode != 0:
+        raise Err("%s failed: %s" % (os.path.basename(cmd[0]), (p.stderr or p.stdout).strip()[:200]))
+    return p.stdout
+
+
+def unit_state(unit):
+    out = run(["systemctl", "show", unit, "-p", "ActiveState", "-p", "SubState",
+               "-p", "ActiveEnterTimestamp", "-p", "UnitFileState"], check=False)
+    kv = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return {"active": kv.get("ActiveState", "unknown"), "sub": kv.get("SubState", ""),
+            "since": kv.get("ActiveEnterTimestamp", ""), "enabled": kv.get("UnitFileState", "")}
+
+
+def cmd_status():
+    res = {"now": int(time.time()), "endpoint": ENDPOINT,
+           "service": unit_state(UNIT), "web": unit_state(WEB_UNIT)}
+    try:
+        res["implementation"] = run([BORINGTUN, "--version"], check=False).strip() or "unknown"
+    except Err:
+        res["implementation"] = "unknown"
+
+    iface = {"up": False, "address": "", "mtu": None, "listen_port": None, "public_key": ""}
+    link = run(["ip", "-o", "link", "show", IFACE], check=False)
+    if link.strip():
+        iface["up"] = ("UP" in link.split("<")[1].split(">")[0].split(",")) if "<" in link else False
+        m = re.search(r"mtu (\d+)", link)
+        iface["mtu"] = int(m.group(1)) if m else None
+        a = re.search(r"inet (\S+)", run(["ip", "-o", "-4", "addr", "show", "dev", IFACE], check=False))
+        iface["address"] = a.group(1) if a else ""
+    try:
+        iface["public_key"] = open(PUBKEY_FILE).read().strip()
+    except OSError:
+        pass
+
+    peers = {"total": 0, "connected": 0, "managed": 0, "pool_size": POOL_SIZE}
+    traffic = {"rx": 0, "tx": 0}
+    dump = run([WG, "show", IFACE, "dump"], check=False).splitlines()
+    if dump:
+        head = dump[0].split("\t")
+        if len(head) > 2 and head[2].isdigit():
+            iface["listen_port"] = int(head[2])
+        for line in dump[1:]:
+            f = line.split("\t")
+            if len(f) < 7:
+                continue
+            peers["total"] += 1
+            traffic["rx"] += int(f[5])
+            traffic["tx"] += int(f[6])
+            hs = int(f[4])                          # BoringTun: seconds ago; kernel: epoch
+            ago = None if hs <= 0 else (max(0, int(time.time()) - hs) if hs > 10 ** 9 else hs)
+            if ago is not None and ago < 180:
+                peers["connected"] += 1
+    try:
+        peers["managed"] = len(re.findall(r"^# BEGIN peer:", open(CONF).read(), re.M))
+    except OSError:
+        pass
+    res.update({"interface": iface, "peers": peers, "traffic": traffic})
+    return res
+
+
+def cmd_config():
+    with open(CONF) as f:
+        text = f.read()
+    return {"config": SECRET_RE.sub(r"\1 <hidden>", text)}
+
+
+def cmd_service(action):
+    if action not in ("start", "stop", "restart"):
+        raise Err("invalid action")
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another service operation is in progress")
+        sys.stderr.write("wg-admin: service %s requested\n" % action)
+        out = subprocess.run(["systemctl", action, UNIT], capture_output=True, text=True,
+                             env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, timeout=90)
+        time.sleep(1)
+        st = unit_state(UNIT)
+        if out.returncode != 0:
+            raise Err("systemctl %s failed (unit is now %s): %s" %
+                      (action, st["active"], (out.stderr or out.stdout).strip()[:200]))
+        return {"action": action, "service": st}
+
+
+SPEEDER_ENV = "/etc/wg-speeder/speeder.env"
+SPEEDER_PREV = "/etc/wg-speeder/speeder.env.prev"
+
+
+def _int_in(lo, hi):
+    def check(v):
+        if not re.fullmatch(r"[0-9]{1,6}", v) or not lo <= int(v) <= hi:
+            raise Err("value out of range (%d-%d)" % (lo, hi))
+        return str(int(v))
+    return check
+
+
+def _fec(v):
+    if len(v) > 200 or not re.fullmatch(r"[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*", v):
+        raise Err("FEC groups must look like 1:3,2:4,10:10 (data:parity, at most 200 characters)")
+    tiers = v.split(",")
+    if len(tiers) > 24:
+        raise Err("at most 24 FEC tiers")
+    last = 0
+    for t in tiers:
+        x, y = (int(n) for n in t.split(":"))
+        if x < 1 or x <= last:
+            raise Err("the data numbers must start at 1 or more and keep increasing")
+        if x + y > 255:
+            raise Err("data + parity must be at most 255 in every group")
+        last = x
+    return v
+
+
+SPEEDER_FIELDS = {
+    "SPEEDER_FEC": _fec, "SPEEDER_FEC_UP": _fec,
+    "SPEEDER_TIMEOUT": _int_in(0, 1000), "SPEEDER_TIMEOUT_UP": _int_in(0, 1000),
+    "SPEEDER_INTERVAL": _int_in(0, 1000), "SPEEDER_INTERVAL_UP": _int_in(0, 1000),
+    "SPEEDER_MTU": _int_in(576, 1500), "SPEEDER_DECODE_BUF": _int_in(300, 20000), "SPEEDER_SOCK_BUF": _int_in(10, 10240),
+}
+
+
+def _speeder_restarts():
+    out = run(["systemctl", "show", SPEEDER_UNIT, "-p", "NRestarts", "--value"], check=False).strip()
+    return int(out) if out.isdigit() else 0
+
+
+def cmd_speeder_set(args):
+    if not args or len(args) > len(SPEEDER_FIELDS):
+        raise Err("nothing to change")
+    new = {}
+    for a in args:
+        k, sep, v = a.partition("=")
+        if not sep or k not in SPEEDER_FIELDS or k in new:
+            raise Err("unknown or repeated setting")
+        new[k] = SPEEDER_FIELDS[k](v)
+    try:
+        with open(SPEEDER_ENV) as f:
+            old_text = f.read()
+        st = os.stat(SPEEDER_ENV)
+    except OSError:
+        raise Err("the FEC service is not configured on this host")
+    lines, seen = [], set()
+    for ln in old_text.splitlines():
+        k = ln.split("=", 1)[0].strip()
+        if "=" in ln and k in new:
+            lines.append("%s=%s" % (k, new[k]))
+            seen.add(k)
+        else:
+            lines.append(ln)
+    for k in new:
+        if k not in seen:
+            lines.append("%s=%s" % (k, new[k]))
+
+    def write(text):
+        tmp = SPEEDER_ENV + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chown(tmp, st.st_uid, st.st_gid)
+        os.chmod(tmp, st.st_mode & 0o777)
+        os.replace(tmp, SPEEDER_ENV)
+
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another operation is in progress")
+        sys.stderr.write("wg-admin: speeder-set %s\n" % ",".join(sorted(new)))
+        write_prev = open(SPEEDER_PREV, "w")
+        os.chmod(SPEEDER_PREV, st.st_mode & 0o777)
+        os.chown(SPEEDER_PREV, st.st_uid, st.st_gid)
+        write_prev.write(old_text)
+        write_prev.close()
+        before = _speeder_restarts()
+        write("\n".join(lines) + "\n")
+        run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+        time.sleep(4)                       # longer than RestartSec: a crash loop shows up as a restart count
+        ok = run(["systemctl", "is-active", SPEEDER_UNIT], check=False).strip() == "active" and _speeder_restarts() == before
+        if not ok:
+            write(old_text)
+            run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+            raise Err("the FEC service would not run with these settings; the previous settings were restored")
+        return {"ok": True, "applied": new, "service": unit_state(SPEEDER_UNIT)}
+
+
+# ---------------------------------------------------------------- port forwarding
+def _nft():
+    for p in ("/usr/sbin/nft", "/sbin/nft", "/usr/bin/nft"):
+        if os.path.exists(p):
+            return p
+    raise Err("forward: nftables is not installed on this host")
+
+
+def _fwd_fail(msg):
+    return Err("forward: " + msg)
+
+
+def _fwd_load():
+    try:
+        with open(FWD_STATE) as f:
+            d = json.load(f)
+        rules = d.get("rules", [])
+        if not isinstance(rules, list):
+            raise ValueError
+        return rules
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        raise _fwd_fail("the saved forwarding list is damaged")
+
+
+def _fwd_devices():
+    """name -> IP of every WireGuard device (managed or not) with an address in 10.99.0.0/24, except this hub."""
+    try:
+        data = json.loads(run([WG_PEER, "list"], timeout=30))
+    except (Err, ValueError):
+        raise _fwd_fail("cannot read the device list")
+    devs, dup = {}, set()
+    for p in data.get("peers", []):
+        name, ip = p.get("name", ""), p.get("ip", "")
+        if not FWD_NAME_RE.match(name) or FWD_IPV4_RE.match(name) or not re.match(r"^10\.99\.0\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$", ip):
+            continue                                  # not addressable (odd name, no address, or the hub itself)
+        if name in devs:
+            dup.add(name)
+        devs[name] = ip
+    for n in dup:                                      # two devices with one name: ambiguous, so not offered
+        del devs[n]
+    return devs
+
+
+def _fwd_local_nets():
+    out = run(["ip", "-4", "-o", "addr", "show"], check=False)
+    nets = []
+    for m in re.finditer(r"inet ([0-9.]+/[0-9]+)", out):
+        try:
+            nets.append(ipaddress.ip_network(m.group(1), strict=False))
+        except ValueError:
+            pass
+    return nets
+
+
+def _fwd_routes():
+    """[(network, device name)]: private IPv4 networks (not the VPN's own, not this host's) that a device carries."""
+    try:
+        peers = json.loads(run([WG_PEER, "list"], timeout=30)).get("peers", [])
+    except (Err, ValueError):
+        raise _fwd_fail("cannot read the device list")
+    names = dict((q.get("public_key"), q.get("name")) for q in peers)
+    vpn = ipaddress.ip_network("10.99.0.0/24")
+    local = _fwd_local_nets()
+    res = []
+    for ln in run([WG, "show", IFACE, "allowed-ips"], check=False).splitlines():
+        f = ln.split()
+        if len(f) < 2:
+            continue
+        for c in f[1:]:
+            try:
+                n = ipaddress.ip_network(c, strict=False)
+            except ValueError:
+                continue
+            if n.version != 4 or not 16 <= n.prefixlen <= 31 or not n.is_private or n.overlaps(vpn) or any(n.overlaps(x) for x in local):
+                continue
+            res.append((n, names.get(f[0]) or "?"))
+    return res
+
+
+def _fwd_lan_via(ip, routes):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for n, via in routes:
+        if a in n and a != n.network_address and a != n.broadcast_address:
+            return via
+    return None
+
+
+def _fwd_listeners():
+    """(proto, port) of everything listening on this host, any address."""
+    out = run(["ss", "-H", "-ltun"], check=False)
+    res = set()
+    for ln in out.splitlines():
+        f = ln.split()
+        if len(f) < 5:
+            continue
+        port = f[4].rsplit(":", 1)[-1]
+        if port.isdigit():
+            res.add(("tcp" if f[0] == "tcp" else "udp", int(port)))
+    return res
+
+
+def _fwd_protos(rule):
+    return ["tcp", "udp"] if rule["proto"] == "both" else [rule["proto"]]
+
+
+def _fwd_target(r, devs, routes):
+    """(ip or None, state-if-broken). A rule points at a device name or at an address on a network a device carries."""
+    if r.get("lan_ip"):
+        return (r["lan_ip"], None) if _fwd_lan_via(r["lan_ip"], routes) else (None, "no route")
+    ip = devs.get(r.get("device"))
+    return (ip, None) if ip else (None, "device missing")
+
+
+def _fwd_render(rules, devs, routes):
+    t = FWD_TABLE
+    out = ["# managed by wg-admin; do not edit", "table ip %s" % t, "delete table ip %s" % t, "table ip %s {" % t,
+           "    chain prerouting {", "        type nat hook prerouting priority dstnat; policy accept;"]
+    for r in rules:
+        ip, _ = _fwd_target(r, devs, routes)
+        if not r["enabled"] or not ip:
+            continue
+        for pr in _fwd_protos(r):
+            m = 'iifname != "%s" fib daddr type local %s dport %d' % (IFACE, pr, r["port"])
+            if r["src"]:
+                out.append('        %s ip saddr != { %s } counter drop comment "pf:%s:%s:deny"' % (m, ", ".join(r["src"]), r["name"], pr))
+            out.append('        %s counter dnat to %s:%d comment "pf:%s:%s"' % (m, ip, r["target_port"], r["name"], pr))
+    out += ["    }", "    chain postrouting {", "        type nat hook postrouting priority srcnat; policy accept;",
+            '        oifname "%s" ct status dnat masquerade comment "pf:masq"' % IFACE, "    }", "}", ""]
+    return "\n".join(out)
+
+
+def _fwd_write(path, text, mode):
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _fwd_apply(rules, devs, routes):
+    """Check the new table, load it in one nft transaction, then persist. On any error nothing changes."""
+    nft = _nft()
+    text = _fwd_render(rules, devs, routes)
+    probe = FWD_NFT + ".check"
+    _fwd_write(probe, text, 0o600)
+    try:
+        p = subprocess.run([nft, "-c", "-f", probe], capture_output=True, text=True, timeout=20)
+        if p.returncode != 0:
+            raise _fwd_fail("the firewall rejected these rules: %s" % (p.stderr.strip().splitlines() or ["?"])[-1][:120])
+    finally:
+        try:
+            os.remove(probe)
+        except OSError:
+            pass
+    p = subprocess.run([nft, "-f", "-"], input=text, capture_output=True, text=True, timeout=20)
+    if p.returncode != 0:
+        raise _fwd_fail("could not load the forwarding rules")
+    _fwd_write(FWD_NFT, text, 0o644)
+    _fwd_write(FWD_STATE, json.dumps({"version": 1, "rules": rules}, indent=1) + "\n", 0o600)
+
+
+def _fwd_counters():
+    """comment tag -> (packets, bytes) from the live table."""
+    res = {}
+    try:
+        data = json.loads(run([_nft(), "-j", "list", "table", "ip", FWD_TABLE], check=False) or "{}")
+    except ValueError:
+        return res
+    for item in data.get("nftables", []):
+        r = item.get("rule")
+        if not r or not str(r.get("comment", "")).startswith("pf:"):
+            continue
+        for e in r.get("expr", []):
+            if "counter" in e:
+                res[r["comment"]] = (e["counter"].get("packets", 0), e["counter"].get("bytes", 0))
+    return res
+
+
+def _fwd_view(rules, devs, routes):
+    cnt = _fwd_counters()
+    out = []
+    for r in rules:
+        ip, broken = _fwd_target(r, devs, routes)
+        # NAT rules only see the first packet of a flow, so this counts new connections (TCP) / flows (UDP);
+        # the table is rebuilt on every change, so it counts since the last change.
+        conns = sum(cnt.get("pf:%s:%s" % (r["name"], pr), (0, 0))[0] for pr in _fwd_protos(r))
+        dropped = sum(cnt.get("pf:%s:%s:deny" % (r["name"], pr), (0, 0))[0] for pr in _fwd_protos(r))
+        out.append({"name": r["name"], "proto": r["proto"], "port": r["port"], "device": r.get("device") or None,
+                    "lan_ip": r.get("lan_ip") or None, "via": _fwd_lan_via(r["lan_ip"], routes) if r.get("lan_ip") else None,
+                    "device_ip": ip, "target_port": r["target_port"], "src": r["src"], "enabled": r["enabled"],
+                    "state": broken or ("active" if r["enabled"] else "off"),
+                    "conns": conns, "blocked": dropped})
+    return out
+
+
+def _fwd_src(v):
+    if v in ("", "-"):
+        return []
+    items = v.split(",")
+    if len(items) > 8:
+        raise _fwd_fail("at most 8 allowed sources")
+    res = []
+    for it in items:
+        try:
+            net = ipaddress.ip_network(it.strip(), strict=False)
+        except ValueError:
+            raise _fwd_fail("allowed sources must be IPv4 addresses or CIDR ranges (e.g. 203.0.113.7 or 198.51.100.0/24)")
+        if net.version != 4 or net.prefixlen < 8:
+            raise _fwd_fail("allowed sources must be IPv4 and no wider than /8; leave it empty to allow everyone")
+        txt = str(net.network_address) if net.prefixlen == 32 else str(net)
+        if txt not in res:
+            res.append(txt)
+    return res
+
+
+def cmd_forward(a):
+    if not a:
+        raise _fwd_fail("usage")
+    sub = a[0]
+    if sub == "list" and len(a) == 1:
+        routes = _fwd_routes()
+        return {"rules": _fwd_view(_fwd_load(), _fwd_devices(), routes), "public_host": ENDPOINT.rsplit(":", 1)[0],
+                "max": FWD_MAX, "min_port": FWD_MIN_PORT,
+                "lans": [{"net": str(n), "via": v} for n, v in routes]}
+    if sub not in ("add", "remove", "enable", "disable", "reconcile"):
+        raise _fwd_fail("usage")
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another operation is in progress")
+        rules, devs, routes = _fwd_load(), _fwd_devices(), _fwd_routes()
+        if sub == "reconcile" and len(a) == 1:
+            _fwd_apply(rules, devs, routes)
+            return {"ok": True}
+        if sub in ("remove", "enable", "disable") and len(a) == 2:
+            idx = [i for i, r in enumerate(rules) if r["name"] == a[1]]
+            if not idx:
+                raise _fwd_fail("no such forwarding rule")
+            new = [dict(r) for r in rules]
+            if sub == "remove":
+                del new[idx[0]]
+            else:
+                new[idx[0]]["enabled"] = (sub == "enable")
+                if sub == "enable":
+                    _fwd_check_conflict(new[idx[0]], [r for i, r in enumerate(new) if i != idx[0]], devs)
+            _fwd_apply(new, devs, routes)
+            sys.stderr.write("wg-admin: forward %s %s\n" % (sub, a[1]))
+            return {"ok": True}
+        if sub == "add" and len(a) == 7:
+            name, proto, port, dest, target, src = a[1:]
+            if not FWD_NAME_RE.match(name):
+                raise _fwd_fail("name: letters, digits, '_', '-', '.' only, max 32 characters")
+            if proto not in FWD_PROTOS:
+                raise _fwd_fail("protocol must be tcp, udp or both")
+            if not (port.isdigit() and target.isdigit()):
+                raise _fwd_fail("ports must be numbers")
+            port, target = int(port), int(target)
+            if not FWD_MIN_PORT <= port <= 65535:
+                raise _fwd_fail("public port must be %d - 65535" % FWD_MIN_PORT)
+            if not 1 <= target <= 65535:
+                raise _fwd_fail("device port must be 1 - 65535")
+            if any(r["name"] == name for r in rules):
+                raise _fwd_fail("a rule with this name already exists")
+            if len(rules) >= FWD_MAX:
+                raise _fwd_fail("at most %d rules" % FWD_MAX)
+            if FWD_IPV4_RE.match(dest):
+                try:
+                    ip = str(ipaddress.ip_address(dest))
+                except ValueError:
+                    raise _fwd_fail("not a valid IPv4 address")
+                if not _fwd_lan_via(ip, routes):
+                    raise _fwd_fail("%s is not on a network that any device carries (see the networks listed on this page)" % ip)
+                rule = {"name": name, "proto": proto, "port": port, "device": "", "lan_ip": ip, "target_port": target,
+                        "src": _fwd_src(src), "enabled": True}
+            else:
+                if dest not in devs:
+                    raise _fwd_fail("no such device")
+                rule = {"name": name, "proto": proto, "port": port, "device": dest, "target_port": target,
+                        "src": _fwd_src(src), "enabled": True}
+            _fwd_check_conflict(rule, rules, devs)
+            _fwd_apply(rules + [rule], devs, routes)
+            sys.stderr.write("wg-admin: forward add %s %s/%d -> %s:%d\n" % (name, proto, port, dest, target))
+            return {"ok": True}
+    raise _fwd_fail("usage")
+
+
+def _fwd_check_conflict(rule, others, devs):
+    if rule["port"] in FWD_RESERVED:
+        raise _fwd_fail("port %d is used by a service on this host" % rule["port"])
+    live = _fwd_listeners()
+    for pr in _fwd_protos(rule):
+        if (pr, rule["port"]) in live:
+            raise _fwd_fail("port %d/%s is already in use on this host" % (rule["port"], pr.upper()))
+        for o in others:
+            if o["enabled"] and o["port"] == rule["port"] and pr in _fwd_protos(o):
+                raise _fwd_fail("port %d/%s is already forwarded by rule \"%s\"" % (rule["port"], pr.upper(), o["name"]))
+
+
+def cmd_logs(source, lines):
+    n = DEFAULT_LINES if lines is None else lines
+    n = max(10, min(MAX_LINES, n))
+    if source == "wg-service":
+        text = run(["journalctl", "-u", UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "web-ui":
+        text = run(["journalctl", "-u", WEB_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "boringtun":
+        try:
+            with open(BORINGTUN_LOG, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 64 * 1024))
+                text = "\n".join(f.read().decode("utf-8", "replace").splitlines()[-n:])
+        except OSError:
+            text = ""
+    elif source == "speeder":
+        text = run(["journalctl", "-u", SPEEDER_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
+    elif source == "faketcp":
+        args = ["journalctl", "-n", str(n), "--no-pager", "-o", "short-iso"]
+        for u in U2R_UNITS:
+            args += ["-u", u]
+        text = run(args, check=False)
+    else:
+        raise Err("invalid log source")
+    text = KEYARG_RE.sub(r"\1<hidden>", SECRET_RE.sub(r"\1 <hidden>", ANSI_RE.sub("", text)))
+    return {"source": source, "lines": text.splitlines()[-n:]}
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        raise Err("must run as root")
+    a = argv[1:]
+    if a == ["status"]:
+        return cmd_status()
+    if a == ["config"]:
+        return cmd_config()
+    if len(a) == 2 and a[0] == "service":
+        return cmd_service(a[1])
+    if a and a[0] == "logs" and len(a) in (2, 3):
+        lines = None
+        if len(a) == 3:
+            if not a[2].isdigit():
+                raise Err("invalid line count")
+            lines = int(a[2])
+        return cmd_logs(a[1], lines)
+    if a and a[0] == "speeder-set":
+        return cmd_speeder_set(a[1:])
+    if a and a[0] == "forward":
+        return cmd_forward(a[1:])
+    raise Err("usage: wg-admin status | config | service start|stop|restart | speeder-set K=V ... | forward ... | logs SOURCE [N]")
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(main(sys.argv), ensure_ascii=False))
+    except Err as e:
+        print(json.dumps({"error": str(e)}, ensure_ascii=False))
+        sys.exit(1)
+    except Exception as e:
+        print(json.dumps({"error": "internal error: %s" % type(e).__name__}))
+        sys.exit(2)

@@ -1,0 +1,25 @@
+[Unit]
+Description=UDPspeeder FEC front for WireGuard (51821 -> wg0 51820)
+After=network.target boringtun-wg0.service
+
+[Service]
+User=wgspeeder
+Group=wgspeeder
+EnvironmentFile=/etc/wg-speeder/speeder.env
+ExecStart=/usr/local/bin/speederv2-wg -s -l0.0.0.0:${SPEEDER_PORT} -r127.0.0.1:51820 -k ${SPEEDER_KEY} -f${SPEEDER_FEC} --timeout ${SPEEDER_TIMEOUT} -i ${SPEEDER_INTERVAL} --mode 0 --mtu ${SPEEDER_MTU} --decode-buf ${SPEEDER_DECODE_BUF} --sock-buf ${SPEEDER_SOCK_BUF} --report 30 --disable-color
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="brand">#00695C</color>
+    <color name="brand_dark">#0A3B36</color>
+    <color name="status_off">#78909C</color>
+    <color name="status_busy">#F9A825</color>
+    <color name="status_on">#2E7D32</color>
+    <color name="status_err">#C62828</color>
+    <color name="icon_bg">#0A3B36</color>
+</resources>
