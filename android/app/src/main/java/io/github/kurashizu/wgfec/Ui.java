@@ -3,22 +3,18 @@ package io.github.kurashizu.wgfec;
 import android.content.res.ColorStateList;
 import android.widget.TextView;
 
-import com.google.android.material.color.MaterialColors;
+import androidx.core.content.ContextCompat;
 
 final class Ui {
-    /** Fills a pill-shaped TextView with the profile's mode: FEC in the accent colour, Direct in a neutral one. */
+    /** Fills a pill-shaped TextView with the profile's mode: FEC in green, Direct in blue, a bad profile in red. */
     static void modeBadge(TextView v, Profile p) {
-        int bgAttr, fgAttr;
+        int bg, fg;
         String t;
-        if (p == null) {
-            t = "Invalid"; bgAttr = com.google.android.material.R.attr.colorErrorContainer; fgAttr = com.google.android.material.R.attr.colorOnErrorContainer;
-        } else if (p.hasFec()) {
-            t = "FEC"; bgAttr = com.google.android.material.R.attr.colorPrimaryContainer; fgAttr = com.google.android.material.R.attr.colorOnPrimaryContainer;
-        } else {
-            t = "Direct"; bgAttr = com.google.android.material.R.attr.colorSecondaryContainer; fgAttr = com.google.android.material.R.attr.colorOnSecondaryContainer;
-        }
+        if (p == null) { t = "Invalid"; bg = R.color.status_err; fg = R.color.mode_fec_fg; }
+        else if (p.hasFec()) { t = "FEC"; bg = R.color.mode_fec_bg; fg = R.color.mode_fec_fg; }
+        else { t = "Direct"; bg = R.color.mode_direct_bg; fg = R.color.mode_direct_fg; }
         v.setText(t);
-        v.setTextColor(MaterialColors.getColor(v, fgAttr));
-        v.setBackgroundTintList(ColorStateList.valueOf(MaterialColors.getColor(v, bgAttr)));
+        v.setTextColor(ContextCompat.getColor(v.getContext(), fg));
+        v.setBackgroundTintList(ColorStateList.valueOf(ContextCompat.getColor(v.getContext(), bg)));
     }
 }

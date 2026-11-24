@@ -4,4 +4,8 @@
     <color name="status_busy">#FFCA28</color>
     <color name="status_on">#66BB6A</color>
     <color name="status_err">#EF5350</color>
+    <color name="mode_fec_bg">#81C784</color>
+    <color name="mode_fec_fg">#0B2E10</color>
+    <color name="mode_direct_bg">#90CAF9</color>
+    <color name="mode_direct_fg">#0B2A4A</color>
 </resources>

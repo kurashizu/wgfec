@@ -7,4 +7,8 @@
     <color name="status_on">#2E7D32</color>
     <color name="status_err">#C62828</color>
     <color name="icon_bg">#0A3B36</color>
+    <color name="mode_fec_bg">#2E7D32</color>
+    <color name="mode_fec_fg">#FFFFFF</color>
+    <color name="mode_direct_bg">#1565C0</color>
+    <color name="mode_direct_fg">#FFFFFF</color>
 </resources>
