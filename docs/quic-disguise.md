@@ -38,6 +38,7 @@ provider's security list. The relay only ever forwards to the ports listed in `Q
 and the link-test probe), so it is not an open relay; it limits each source address and the number of connections.
 
 The admin page shows it on the service page and adds `"quic":{"p":PORT,"s":NAME}` to the app string; the app then offers the switch.
+In a device's config window the admin page offers three types: **Direct**, **Via UDPspeeder (FEC)** and **FEC over QUIC** (only when wg-quic runs). The QUIC view adds `"qd":1` to the app string so the app starts with the disguise on. The WireGuard config and the speederv2 command are the same as for FEC, because only the Android app can do the disguise; the page says so.
 
 ## Phone
 

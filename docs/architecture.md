@@ -21,7 +21,7 @@
 - **FEC levels.** Besides the main service (the *default level*, on UDP 62932) the server runs one `speederv2` per level on its own
   port (62940-62944: aggressive, light, balanced, conservative, maximum). A device picks the downlink strength by choosing which
   port it connects to, and the uplink strength with its own `-f`, so the server needs no control channel and no restart.
-- **Connection types per device:** `direct` or `speeder`. The admin page generates the matching client config and command.
+- **Connection types per device:** `direct` or `speeder` (FEC), and in the app FEC over QUIC. A device is not tied to one: the admin page opens its config as any of them ("Add a device" does not ask). It generates the matching client config and command.
 - **Admin web** (`app.py`): Python standard library only, localhost, password and session cookie. It never runs privileged
   code itself: it calls `wg-peer` and `wg-admin` through a fixed sudo whitelist.
 - **State:** `/etc/wireguard/wg0.conf` (devices), `/etc/wg-speeder/speeder.env` (key, ports, and the default level's FEC settings), `/etc/wg-speeder/levels.json` (the FEC levels),

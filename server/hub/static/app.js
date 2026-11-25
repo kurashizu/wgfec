@@ -208,24 +208,16 @@
     load(); autoRefresh(load, 5000);
   };
 
-  var VIA_LABEL = { direct: 'Direct (WireGuard)', speeder: 'Via UDPspeeder (FEC)' };
+  var VIA_LABEL = { direct: 'Direct (WireGuard)', speeder: 'Via UDPspeeder (FEC)', quic: 'FEC over QUIC' };
 
   // ---------- devices ----------
   RENDER.devices = function () {
     var msg = el('div');
     var name = el('input', { type: 'text', placeholder: 'Device name (e.g. laptop)', maxlength: '32', autocomplete: 'off', required: true, 'aria-label': 'Device name' });
     var addr = el('input', { type: 'text', placeholder: 'Address (optional)', maxlength: '13', autocomplete: 'off', inputmode: 'numeric', 'aria-label': 'Static address (optional)' });
-    var via = el('select', { 'aria-label': 'Connection type' }, [
-      el('option', { value: 'direct', text: VIA_LABEL.direct })]);
-    api('GET', '/api/speeder').then(function (r) {            // FEC-only servers: no choice to make
-      if (!r.ok || !r.data.enabled) return;
-      Object.keys(r.data.modes || {}).forEach(function (k) { via.appendChild(el('option', { value: k, text: VIA_LABEL[k] })); });
-      if (r.data.required) { via.value = 'speeder'; via.style.display = 'none'; }
-      else if (r.data.default_via === 'speeder') via.value = 'speeder';
-    });
     var addBtn = el('button', { class: 'btn primary', type: 'submit', text: 'Add device' });
     var hint = el('div', { class: 'muted hint' });
-    var form = el('form', { class: 'row' }, [name, addr, via, addBtn]);
+    var form = el('form', { class: 'row' }, [name, addr, addBtn]);
     var pool = el('span', { class: 'muted' });
     var tbody = el('tbody');
     var table = el('div', { class: 'tablewrap' }, [el('table', {}, [
@@ -241,7 +233,7 @@
 
     form.addEventListener('submit', function (e) {
       e.preventDefault(); clear(msg);
-      var body = { name: name.value.trim(), via: via.value };
+      var body = { name: name.value.trim() };
       var a = addr.value.trim();
       if (a) {
         if (/^[0-9]{1,3}$/.test(a)) a = '10.99.0.' + a;            // allow just the last octet
@@ -382,8 +374,8 @@
   // ---------- show a device's config (right after creating it, or again later) ----------
   function viewConfig(name, via) {
     function go(v) {
-      api('GET', '/api/peers/' + encodeURIComponent(name) + '/config' + (v ? '?via=' + v : '')).then(function (r) {
-        if (r.ok) return showConfig(r.data, false);
+      api('GET', '/api/peers/' + encodeURIComponent(name) + '/config' + (v ? '?via=' + (v === 'quic' ? 'speeder' : v) : '')).then(function (r) {
+        if (r.ok) { if (v === 'quic') r.data.qd = true; return showConfig(r.data, false); }
         var m = openModal('Cannot show the config', [
           el('div', { class: 'msg bad', text: r.data.error || 'Failed to load the config' }),
           el('div', { class: 'row end' }, [el('button', { class: 'btn', text: 'Close', onclick: function () { m.close(); } })])
@@ -408,7 +400,7 @@
     var sp = c.speeder || d.speeder_cmd;
     if (typeof sp === 'string' && sp) o.sp = sp;
     if (typeof d.probe === 'number') o.probe = d.probe;                                // UDP port of the server's link-test probe
-    if (d.quic && typeof d.quic.p === 'number' && typeof d.quic.s === 'string') o.quic = d.quic;   // the server accepts the FEC tunnel dressed up as QUIC: {p: port, s: name}
+    if (d.quic && typeof d.quic.p === 'number' && typeof d.quic.s === 'string') { o.quic = d.quic; if (d.qd && sp) o.qd = 1; }   // the server accepts the FEC tunnel dressed up as QUIC: {p: port, s: name}; qd: the app starts with it on
     if (sp && Array.isArray(d.tiers) && d.tiers.length) o.tiers = d.tiers;       // FEC levels the app can switch between
     var raw = new TextEncoder().encode(JSON.stringify(o));
     var plain = 'wgfec://1/' + b64url(raw);
@@ -417,7 +409,7 @@
       .then(function (buf) { var z = 'wgfec://1z/' + b64url(new Uint8Array(buf)); return z.length < plain.length ? z : plain; }, function () { return plain; });
   }
   function showConfig(d, created) {
-    var curVia = d.via || (d.speeder ? 'speeder' : 'direct');
+    var curVia = d.qd ? 'quic' : d.via || (d.speeder ? 'speeder' : 'direct');
     var img = el('img', { class: 'qr', alt: 'QR code of the client config' });
     try {
       var qr = qrcode(0, 'M'); qr.addData(d.config); qr.make();
@@ -436,21 +428,24 @@
     if (unsaved) head = el('div', { class: 'msg bad', text: 'This config could not be saved on the server. This is the only time the private key is shown, so save it now. Address: ' + d.ip });
     else if (created) head = el('div', { class: 'msg ok', text: 'Device created. The config is kept on this server; open it again any time from the Devices list. Address: ' + d.ip });
     else head = el('div', { class: 'msg warn', text: 'This config contains the device\'s private key. Keep it private. Address: ' + d.ip });
+    var qnote = d.qd ? el('div', { class: 'msg', text: 'FEC over QUIC: the Android app sends the FEC tunnel to UDP ' + (d.quic ? d.quic.p : '') + ' as QUIC-looking packets; use the app string below (it switches the disguise on). The config and command for a computer are the same as for FEC, because only the app can do the disguise.' }) : null;
     var sw = el('div', { class: 'row' });
-    var m = openModal(created ? 'Device "' + d.name + '" created' : 'Device "' + d.name + '"', [head, sw, img, el('pre', { text: d.config })
-    ].concat([
+    var m = openModal(created ? 'Device "' + d.name + '" created' : 'Device "' + d.name + '"', [head, sw].concat(qnote ? [qnote] : []).concat([img, el('pre', { text: d.config })]).concat([
       setupGuide(d.cmds || d.speeder_cmd || null, d.name + '.conf', d)
     ]).concat([
       el('div', { class: 'row end' }, [dl, copyBtn, el('button', { class: 'btn', text: 'Close', onclick: function () { m.close(); } })])
     ]));
     if (unsaved) return;
     api('GET', '/api/speeder').then(function (r) {            // offer the other connection type when this server has both
-      if (!r.ok || !r.data.enabled || r.data.active !== 'active' || r.data.required) return;
+      if (!r.ok || !r.data.enabled || r.data.active !== 'active') return;
+      var kinds = (r.data.required ? [] : ['direct']).concat(Object.keys(r.data.modes || {}));
+      if (r.data.quic && r.data.quic.state === 'active' && kinds.indexOf('speeder') >= 0) kinds.push('quic');
+      if (kinds.length < 2) return;
       sw.appendChild(el('span', { class: 'muted', text: 'Config for:' }));
-      ['direct'].concat(Object.keys(r.data.modes || {})).map(function (k) { return [k, VIA_LABEL[k]]; }).forEach(function (o) {
+      kinds.map(function (k) { return [k, VIA_LABEL[k]]; }).forEach(function (o) {
         var b = el('button', { class: 'btn slim' + (o[0] === curVia ? ' on' : ''), type: 'button', text: o[1] });
         if (o[0] !== curVia) b.addEventListener('click', function () {
-          api('POST', '/api/peers/' + encodeURIComponent(d.name) + '/mode', { via: o[0] }).then(function () { m.close(); viewConfig(d.name, o[0]); });   // remember the choice
+          api('POST', '/api/peers/' + encodeURIComponent(d.name) + '/mode', { via: o[0] === 'quic' ? 'speeder' : o[0] }).then(function () { m.close(); viewConfig(d.name, o[0]); });   // remember the choice (the QUIC disguise is the FEC type, switched on in the app)
         });
         sw.appendChild(b);
       });

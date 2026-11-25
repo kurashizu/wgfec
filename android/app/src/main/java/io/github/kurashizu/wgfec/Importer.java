@@ -24,11 +24,12 @@ final class Importer {
     /** text is an app string (wgfec://...) or a plain WireGuard config, optionally followed by the speederv2 command. */
     static void offer(Activity a, String text, Runnable done) {
         String name, profileText;
+        boolean quicOn = false;
         Profile p;
         try {
             if (AppString.looksLike(text)) {
                 AppString q = AppString.parse(text);
-                name = q.name; profileText = q.profileText;
+                name = q.name; profileText = q.profileText; quicOn = q.quicDefault;
             } else {
                 name = "Profile"; profileText = text.trim() + "\n";
             }
@@ -48,13 +49,15 @@ final class Importer {
         wrap.setPadding(pad, pad / 3, pad, 0);
         wrap.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         final String finalText = profileText;
+        final boolean startQuic = quicOn && p.hasQuic();
         new MaterialAlertDialogBuilder(a)
                 .setTitle("Add profile")
-                .setMessage(p.describe())
+                .setMessage(p.describe() + (startQuic ? "\nQUIC disguise: on (you can switch it off in Debug)" : p.hasQuic() ? "\nQUIC disguise: available, off (switch it on in Debug)" : ""))
                 .setView(wrap)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Add", (d, w) -> {
                     Store.Item it = Store.add(a, String.valueOf(field.getText()), finalText);
+                    if (startQuic) Tuning.setQuic(a, it.id, true);
                     Toast.makeText(a, "Added \"" + it.name + "\"", Toast.LENGTH_SHORT).show();
                     if (done != null) done.run();
                 }).show();

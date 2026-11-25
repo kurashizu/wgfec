@@ -649,11 +649,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             name = (body or {}).get("name", "")
             if not isinstance(name, str) or not NAME_RE.match(name):
                 return self.send_json(400, {"error": "Name: letters, digits, '_', '-', '.' only, max 32 characters"})
-            via = (body or {}).get("via", "direct")
-            if via not in VIA_MODES:
-                return self.send_json(400, {"error": "Invalid connection type"})
             sinfo = None
             info0 = speeder_info()
+            # a device is not tied to a connection type (its config can be opened as either); the form does not ask, so the
+            # server's own default is used, and a client of the API may still name one
+            via = (body or {}).get("via")
+            if via is None:
+                via = "speeder" if info0 and (info0.get("required") or info0.get("default_via") == "speeder") and via_ready(info0, "speeder") is None else "direct"
+            if via not in VIA_MODES:
+                return self.send_json(400, {"error": "Invalid connection type"})
             if info0 and info0.get("required") and via == "direct":
                 via = "speeder"          # this server only accepts FEC connections
             if via != "direct":
