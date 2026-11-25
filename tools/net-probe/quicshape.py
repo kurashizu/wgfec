@@ -1,0 +1,181 @@
+"""Make net-probe datagrams look like a QUIC v1 connection (the way Hysteria 2 and HTTP/3 look on the wire).
+
+This is a disguise, not QUIC: there is no real TLS handshake and nothing is negotiated. What an observer that
+looks at single packets or at the first packets of a flow sees:
+
+    client -> server   Initial        long header, version 1, RFC 9001 Initial keys, AES-128-GCM and header
+                                      protection exactly as the RFC says, so a DPI box that decrypts Initial
+                                      packets gets a real-looking TLS 1.3 ClientHello with the given SNI, ALPN h3,
+                                      and QUIC transport parameters. Padded to 1200 bytes or more.
+    server -> client   Initial+Handshake coalesced in one datagram: a ServerHello in a valid Initial packet,
+                                      then random bytes in a Handshake packet. Never longer than the request.
+    client -> server   Handshake      a small packet of random bytes
+    after that         short header   0b01xxxxxx, an 8 byte connection id, 4 bytes that stand for the masked packet
+                                      number, then the net-probe packet encrypted with AES-CTR (so it looks random).
+
+Needs the "cryptography" package (AES). Without it AVAILABLE is False and the callers fall back to plain mode.
+"""
+import hashlib
+import hmac
+import os
+import struct
+
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    AVAILABLE = True
+except Exception:       # pragma: no cover - depends on the host
+    AVAILABLE = False
+
+SALT_V1 = bytes.fromhex("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
+OVERHEAD = 13                   # short header: 1 flags + 8 connection id + 4 "packet number"
+CID_LEN = 8
+MIN_INITIAL = 1200
+
+
+def _expand_label(secret, label, length):
+    full = b"tls13 " + label
+    info = struct.pack(">H", length) + bytes([len(full)]) + full + b"\x00"
+    return hmac.new(secret, info + b"\x01", hashlib.sha256).digest()[:length]
+
+
+def initial_keys(dcid, server):
+    """(key, iv, hp) for the Initial packets of a connection whose client chose destination id dcid (RFC 9001 5.2)."""
+    secret = hmac.new(SALT_V1, dcid, hashlib.sha256).digest()
+    side = _expand_label(secret, b"server in" if server else b"client in", 32)
+    return _expand_label(side, b"quic key", 16), _expand_label(side, b"quic iv", 12), _expand_label(side, b"quic hp", 16)
+
+
+def varint(n):
+    if n < 0x40:
+        return bytes([n])
+    if n < 0x4000:
+        return struct.pack(">H", 0x4000 | n)
+    return struct.pack(">I", 0x80000000 | n)
+
+
+def _ext(t, body):
+    return struct.pack(">HH", t, len(body)) + body
+
+
+def client_hello(sni, scid):
+    name = sni.encode()
+    tp = b""
+    for pid, val in ((0x01, varint(30000)), (0x03, varint(1452)), (0x04, varint(15728640)), (0x05, varint(6291456)),
+                     (0x06, varint(6291456)), (0x07, varint(6291456)), (0x08, varint(100)), (0x09, varint(103)),
+                     (0x0e, varint(4)), (0x0f, scid)):
+        tp += varint(pid) + varint(len(val)) + val
+    ext = b"".join([
+        _ext(0, struct.pack(">HBH", len(name) + 3, 0, len(name)) + name),
+        _ext(10, struct.pack(">H", 6) + bytes.fromhex("001d00170018")),
+        _ext(13, struct.pack(">H", 16) + bytes.fromhex("04030804040105030805050108060601")),
+        _ext(16, b"\x00\x03\x02h3"),
+        _ext(43, b"\x02\x03\x04"),
+        _ext(45, b"\x01\x01"),
+        _ext(51, struct.pack(">HHH", 36, 0x001d, 32) + os.urandom(32)),
+        _ext(57, tp),
+    ])
+    body = (b"\x03\x03" + os.urandom(32) + b"\x00" + struct.pack(">H", 6) + bytes.fromhex("130113021303")
+            + b"\x01\x00" + struct.pack(">H", len(ext)) + ext)
+    return b"\x01" + struct.pack(">I", len(body))[1:] + body
+
+
+def server_hello():
+    ext = _ext(43, b"\x03\x04") + _ext(51, struct.pack(">HH", 0x001d, 32) + os.urandom(32))
+    body = b"\x03\x03" + os.urandom(32) + b"\x00" + b"\x13\x01" + b"\x00" + struct.pack(">H", len(ext)) + ext
+    return b"\x02" + struct.pack(">I", len(body))[1:] + body
+
+
+def _crypto_frame(data):
+    return b"\x06\x00" + varint(len(data)) + data
+
+
+def _initial(dcid, scid, frames, server, pn, size, key_cid=None):
+    """A protected Initial packet. size = exact length wanted for this packet, or 0 for no padding.
+    The keys come from the destination id the client chose first (key_cid), which is dcid for the client's own packets."""
+    key, iv, hp = initial_keys(key_cid or dcid, server)
+    pn_len = 2
+    head = bytes([0xC0 | (pn_len - 1)]) + b"\x00\x00\x00\x01" + bytes([len(dcid)]) + dcid + bytes([len(scid)]) + scid + b"\x00"
+    fixed = len(head) + 2 + pn_len + 16
+    payload = frames
+    if size:
+        payload += bytes(max(0, size - fixed - len(payload)))
+    if len(payload) < 4:
+        payload += bytes(4 - len(payload))
+    length = pn_len + len(payload) + 16
+    hdr = head + struct.pack(">H", 0x4000 | length) + struct.pack(">H", pn)
+    nonce = bytes(a ^ b for a, b in zip(iv, bytes(12 - 4) + struct.pack(">I", pn)))
+    pkt = bytearray(hdr + AESGCM(key).encrypt(nonce, payload, hdr))
+    pn_off = len(hdr) - pn_len
+    mask = Cipher(algorithms.AES(hp), modes.ECB()).encryptor().update(bytes(pkt[pn_off + 4:pn_off + 20]))
+    pkt[0] ^= mask[0] & 0x0F
+    for i in range(pn_len):
+        pkt[pn_off + i] ^= mask[1 + i]
+    return bytes(pkt)
+
+
+def _handshake_packet(dcid, scid, size):
+    """A Handshake packet of random bytes: nobody but the real endpoints could tell it from a real one."""
+    pn_len = 2
+    head = bytes([0xE0 | (pn_len - 1)]) + b"\x00\x00\x00\x01" + bytes([len(dcid)]) + dcid + bytes([len(scid)]) + scid
+    body = max(20, size - len(head) - 2)
+    return head + struct.pack(">H", 0x4000 | body) + os.urandom(body)
+
+
+def client_first_flight(dcid, scid, sni, size=0):
+    """The datagrams a client sends to start a connection: (Initial, small Handshake)."""
+    size = size or MIN_INITIAL + (os.urandom(1)[0] % 80)
+    ini = _initial(dcid, scid, _crypto_frame(client_hello(sni, scid)), False, 0, size)
+    return ini, _handshake_packet(dcid, scid, 60 + os.urandom(1)[0] % 60)
+
+
+def parse_client_initial(data):
+    """(dcid, scid) of an Initial packet of QUIC v1 that is long enough to be one, else None."""
+    if len(data) < MIN_INITIAL or data[0] & 0xB0 != 0x80 or data[1:5] != b"\x00\x00\x00\x01":
+        return None
+    dl = data[5]
+    if not 8 <= dl <= 20 or len(data) < 7 + dl:
+        return None
+    sl = data[6 + dl]
+    if sl > 20 or len(data) < 8 + dl + sl:
+        return None
+    return bytes(data[6:6 + dl]), bytes(data[7 + dl:7 + dl + sl])
+
+
+def server_first_flight(client_dcid, client_scid, limit):
+    """One datagram answering a client Initial: Initial (ServerHello) coalesced with a Handshake packet.
+    The server's own connection id is the one the client chose, so both sides use it afterwards. At most `limit` bytes."""
+    cid = client_dcid
+    ini = _initial(client_scid, cid, b"\x02\x00\x00\x00\x00" + _crypto_frame(server_hello()), True, 0, 0, key_cid=client_dcid)
+    rest = max(0, min(limit, 1252) - len(ini))
+    if rest < 60:
+        return ini[:limit]
+    return ini + _handshake_packet(client_scid, cid, rest)
+
+
+def is_long_header(data):
+    return len(data) > 0 and data[0] & 0x80 != 0
+
+
+def is_short_header(data):
+    return len(data) > OVERHEAD and data[0] & 0xC0 == 0x40
+
+
+def _ctr(cid, nonce):
+    key = hashlib.sha256(b"npr-quic" + cid).digest()[:16]
+    return Cipher(algorithms.AES(key), modes.CTR(nonce + bytes(12))).encryptor()
+
+
+def wrap(cid, inner):
+    """A short header packet carrying the net-probe packet `inner`."""
+    nonce = os.urandom(4)
+    first = 0x40 | (os.urandom(1)[0] & 0x3F)
+    return bytes([first]) + cid + nonce + _ctr(cid, nonce).update(inner)
+
+
+def unwrap(data):
+    """(cid, inner) from a short header packet made by wrap(), else None."""
+    if not is_short_header(data):
+        return None
+    cid = bytes(data[1:1 + CID_LEN])
+    return cid, _ctr(cid, bytes(data[1 + CID_LEN:OVERHEAD])).update(bytes(data[OVERHEAD:]))

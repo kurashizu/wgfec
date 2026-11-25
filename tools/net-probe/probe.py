@@ -26,6 +26,13 @@ def _now_ns():
     return f() if f else int(time.perf_counter() * 1e9)
 
 
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import quicshape
+except Exception:       # the plain test works without it
+    class quicshape(object):
+        AVAILABLE = False
+
 MAGIC = b"NPR1"
 HDR = struct.Struct(">4sBII")
 DATA_FMT = struct.Struct(">4sBIIQI")          # header + t_send_ns + server_rx  (25 bytes)
@@ -71,9 +78,11 @@ def group_fail(x, y, p):
 
 
 class Phase(object):
-    def __init__(self, sock, addr, pps, size, dur):
-        self.sock, self.addr = sock, addr
-        self.pps, self.size, self.dur = pps, size, dur
+    def __init__(self, sock, addr, pps, size, dur, cid=None):
+        self.sock, self.addr, self.cid = sock, addr, cid
+        self.pps, self.dur = pps, dur
+        # in QUIC shape the packet on the wire is `size` bytes too, so the probe packet inside is smaller by the wrapper
+        self.size = max(32, size - quicshape.OVERHEAD) if cid else size
         self.n = int(pps * dur)
         self.sid = random.getrandbits(32)
         self.rtt = [None] * self.n            # ms, None = no echo
@@ -82,6 +91,9 @@ class Phase(object):
         self.reorder = 0
         self.summary = {}                     # chunk -> bitmap bytes
         self.summary_rx = None
+
+    def tx(self, data):
+        self.sock.sendto(quicshape.wrap(self.cid, bytes(data)) if self.cid else data, self.addr)
 
     # ---- receiving -------------------------------------------------------------------------
     def handle(self, data):
@@ -112,6 +124,12 @@ class Phase(object):
                 break
             except (ConnectionResetError, OSError):
                 break                           # Windows reports ICMP "port unreachable" this way
+            if self.cid:
+                un = quicshape.unwrap(data)
+                if not un or un[0] != self.cid:
+                    r, _, _ = select.select([self.sock], [], [], 0)
+                    continue
+                data = un[1]
             self.handle(data)
             r, _, _ = select.select([self.sock], [], [], 0)
 
@@ -128,7 +146,7 @@ class Phase(object):
             while sent < self.n and now >= start + sent * interval and burst < 64:
                 DATA_FMT.pack_into(buf, 0, MAGIC, DATA, self.sid, sent, _now_ns(), 0)
                 try:
-                    self.sock.sendto(buf, self.addr)
+                    self.tx(buf)
                 except (BlockingIOError, InterruptedError):
                     pass
                 except OSError:
@@ -156,7 +174,7 @@ class Phase(object):
                 HDR.pack_into(fin, 0, MAGIC, FIN, self.sid, c)
                 struct.pack_into(">I", fin, 13, self.n)
                 try:
-                    self.sock.sendto(fin, self.addr)
+                    self.tx(fin)
                 except OSError:
                     pass
                 deadline = time.perf_counter() + 0.7
@@ -291,6 +309,8 @@ def main():
     ap = argparse.ArgumentParser(description="UDP loss/latency probe, per direction")
     ap.add_argument("server")
     ap.add_argument("--port", type=int, default=62933)
+    ap.add_argument("--quic", action="store_true", help="dress the packets up as QUIC (see quicshape.py); try with --port 443")
+    ap.add_argument("--sni", default="www.kestrelmoor.com.au", help="server name written into the fake QUIC Initial (default %(default)s)")
     ap.add_argument("--phase", action="append", metavar="PPS:SIZE:SECONDS")
     ap.add_argument("--json", metavar="FILE", help="also write the results to this JSON file")
     ap.add_argument("--quick", action="store_true", help="short test (about 20 s) to check that it works")
@@ -313,12 +333,34 @@ def main():
         sys.exit("cannot resolve %s: %s" % (args.server, e))
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setblocking(False)
+    cid = None
+    if args.quic:
+        if not quicshape.AVAILABLE:
+            sys.exit("--quic needs the Python module 'cryptography' (pip install cryptography)")
+        cid = os.urandom(quicshape.CID_LEN)
+        ini, hs = quicshape.client_first_flight(cid, os.urandom(8), args.sni)
+        answered = False
+        for _ in range(4):
+            sock.sendto(ini, addr)
+            sock.sendto(hs, addr)
+            end = time.time() + 0.5
+            while time.time() < end and not answered:
+                r, _, _ = select.select([sock], [], [], 0.1)
+                if r:
+                    try:
+                        d, _ = sock.recvfrom(2048)
+                    except OSError:
+                        continue
+                    answered = quicshape.is_long_header(d)
+            if answered:
+                break
+        print("QUIC shape: fake Initial for %s sent, server %s" % (args.sni, "answered" if answered else "did not answer (continuing anyway)"))
     print("net-probe -> %s:%d   (%s, Python %s)" % (addr[0], addr[1], platform.system(), platform.python_version()))
     print("Keep this window open until it finishes. Plan: " + ", ".join("%d pps x %d B x %d s" % p for p in plan))
     results = []
     for i, (pps, size, sec) in enumerate(plan, 1):
         print("\nPhase %d: sending %d packets ..." % (i, int(pps * sec)))
-        ph = Phase(sock, addr, pps, size, sec)
+        ph = Phase(sock, addr, pps, size, sec, cid)
         ph.send_all(progress=sys.stdout.isatty())
         complete = ph.fetch_summary()
         st = ph.stats(complete)

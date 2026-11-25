@@ -24,10 +24,18 @@ packet and swallows `length` packets); they exist to check the client's statisti
 import argparse
 import os
 import random
+import select
 import socket
 import struct
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))     # python -I does not do this
+try:
+    import quicshape
+    QUIC = quicshape.AVAILABLE
+except Exception:
+    QUIC = False
 
 MAGIC = b"NPR1"
 HDR = struct.Struct(">4sBII")
@@ -75,7 +83,7 @@ def run_histogram(bm, total):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--port", type=int, default=62933)
+    ap.add_argument("--port", type=int, action="append", help="UDP port to listen on; repeat for several (default 62933)")
     ap.add_argument("--bind", default="0.0.0.0")
     args = ap.parse_args()
     drop_rx = float(os.environ.get("PROBE_DROP_RX", "0"))
@@ -83,10 +91,13 @@ def main():
     burst_p, _, burst_len = os.environ.get("PROBE_BURST_RX", "0,0").partition(",")
     burst_p, burst_len, burst_left = float(burst_p), int(burst_len or 0), 0
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((args.bind, args.port))
-    sock.settimeout(1.0)
-    log("net-probe listening on %s:%d%s" % (args.bind, args.port,
+    socks = []
+    for port in args.port or [62933]:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.bind((args.bind, port))
+        socks.append(sk)
+    log("net-probe listening on %s:%s%s%s" % (args.bind, ",".join(str(s.getsockname()[1]) for s in socks),
+        " (QUIC-shaped packets accepted)" if QUIC else " (QUIC shape off: no cryptography module)",
         " (TEST DROP rx=%g%% tx=%g%%)" % (drop_rx, drop_tx) if drop_rx or drop_tx else ""))
 
     sessions, buckets = {}, {}
@@ -102,10 +113,12 @@ def main():
         return True
 
     while True:
+        data = None
         try:
-            data, addr = sock.recvfrom(2048)
-        except socket.timeout:
-            data = None
+            ready = select.select(socks, [], [], 1.0)[0]
+            if ready:
+                sock = ready[0]
+                data, addr = sock.recvfrom(2048)
         except OSError:
             continue
         now = time.monotonic()
@@ -117,12 +130,24 @@ def main():
                 del buckets[ip]
         if data is None or len(data) < HDR.size:
             continue
-        magic, typ, sid, seq = HDR.unpack_from(data)
-        if magic != MAGIC:
-            continue
         ip = addr[0]
-        if not allow(ip, now):
+        cid = None
+        if data[:4] != MAGIC:
+            # not a plain probe packet: maybe one dressed up as QUIC (see quicshape.py)
+            if not QUIC or not allow(ip, now):
+                continue
+            if quicshape.is_long_header(data):
+                first = quicshape.parse_client_initial(data)
+                if first:
+                    sock.sendto(quicshape.server_first_flight(first[0], first[1], len(data)), addr)
+                continue
+            un = quicshape.unwrap(data)
+            if not un or len(un[1]) < HDR.size or un[1][:4] != MAGIC:
+                continue
+            cid, data = un
+        elif not allow(ip, now):
             continue
+        magic, typ, sid, seq = HDR.unpack_from(data)
         if drop_rx and random.random() * 100 < drop_rx:
             continue
         if burst_len and typ == DATA:
@@ -154,7 +179,7 @@ def main():
             struct.pack_into(">I", out, 21, s.rx)
             if drop_tx and random.random() * 100 < drop_tx:
                 continue
-            sock.sendto(bytes(out), addr)
+            sock.sendto(quicshape.wrap(cid, bytes(out)) if cid else bytes(out), addr)
 
         elif typ == FIN:
             if len(data) < MIN_FIN:
@@ -181,7 +206,7 @@ def main():
                     % (sid, ip, total, total - lost, 100.0 * lost / total,
                        runs.count(1), runs.count(2), runs.count(3), runs.count(4),
                        sum(1 for r in runs if r >= 5), max(runs) if runs else 0))
-            sock.sendto(out, addr)
+            sock.sendto(quicshape.wrap(cid, out) if cid else out, addr)
 
 
 if __name__ == "__main__":

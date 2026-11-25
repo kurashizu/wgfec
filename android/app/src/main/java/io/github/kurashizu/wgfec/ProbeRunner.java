@@ -24,16 +24,25 @@ final class ProbeRunner {
     /** What the last test suggests for one profile (indexes into its levels, -1 for none), and the text to show. Never applied by itself. */
     static volatile String suggestId = "", suggestMsg;
     static volatile int suggestUp = -1, suggestDown = -1;
-    static volatile boolean cancelled;
+    static volatile boolean cancelled, quic;
+    /** The name written into the fake QUIC Initial. It does not exist: nothing resolves or checks it. */
+    static final String QUIC_SNI = "www.kestrelmoor.com.au";
     static volatile List<LinkProbe.Result> results = new ArrayList<>();
     private static LinkProbe probe;
 
     /** Runs a test. With a profile (and its id), the FEC level of that profile is chosen from the result and applied. */
     static synchronized boolean start(Context ctx, String profileId, String name, Profile profile, List<LinkProbe.Phase> plan) {
+        return start(ctx, profileId, name, profile, plan, false, 0);
+    }
+
+    /** {@code quicShape}: dress the packets up as QUIC. {@code portOverride} > 0 tests that port instead of the profile's. */
+    static synchronized boolean start(Context ctx, String profileId, String name, Profile profile, List<LinkProbe.Phase> plan,
+                                      boolean quicShape, int portOverride) {
         if (running) return false;
         running = true; cancelled = false; error = null; suggestId = ""; suggestMsg = null; suggestUp = suggestDown = -1; results = new ArrayList<>();
         String h = profile.serverHost();
-        int p = profile.linkTestPort();
+        int p = portOverride > 0 ? portOverride : profile.linkTestPort();
+        quic = quicShape;
         host = h; port = p; profileName = name; phase = 0; phases = plan.size(); sent = total = echoes = 0; stage = "starting";
         LinkProbe lp = probe = new LinkProbe();
         Thread t = new Thread(() -> {
@@ -49,13 +58,13 @@ final class ProbeRunner {
                         results = l;
                         changed();
                     }
-                });
+                }, quicShape ? QUIC_SNI : null);
             } catch (java.net.UnknownHostException e) {
                 error = "Cannot resolve \"" + h + "\".";
             } catch (Exception e) {
                 error = e.getMessage() != null ? e.getMessage() : e.toString();
             } finally {
-                if (profile.hasTiers() && !cancelled && error == null && !results.isEmpty()) suggest(profileId, profile);
+                if (profile.hasTiers() && !quicShape && !cancelled && error == null && !results.isEmpty()) suggest(profileId, profile);
                 running = false;
                 changed();
             }

@@ -70,7 +70,10 @@ final class LinkProbe {
 
     // ---------------------------------------------------------------------------------------------------------
 
-    List<Result> run(String host, int port, List<Phase> plan, Listener l) throws IOException {
+    List<Result> run(String host, int port, List<Phase> plan, Listener l) throws IOException { return run(host, port, plan, l, null); }
+
+    /** With a non-null {@code sni} the packets are dressed up as QUIC (see QuicShape), naming that server. */
+    List<Result> run(String host, int port, List<Phase> plan, Listener l, String sni) throws IOException {
         InetAddress ip = resolve(host);
         List<Result> out = new ArrayList<>();
         try (DatagramSocket sock = new DatagramSocket()) {
@@ -78,6 +81,10 @@ final class LinkProbe {
             sock.setReceiveBufferSize(1 << 20);
             sock.connect(new InetSocketAddress(ip, port));
             Run run = new Run(sock);
+            if (sni != null) {
+                try { run.shape = new QuicShape(); } catch (java.security.GeneralSecurityException e) { throw new IOException("QUIC shape is not available on this device: " + e.getMessage()); }
+                run.openQuic(sni);
+            }
             Thread rx = new Thread(run::receiveLoop, "linkprobe-rx");
             rx.setDaemon(true);
             rx.start();
@@ -104,7 +111,8 @@ final class LinkProbe {
 
     private final class Run {
         final DatagramSocket sock;
-        volatile boolean stop, refused;
+        volatile boolean stop, refused, answered;
+        QuicShape shape;
         volatile Cur cur;
 
         Run(DatagramSocket sock) { this.sock = sock; }
@@ -140,7 +148,41 @@ final class LinkProbe {
                     if (stop) return;
                     continue;      // e.g. ICMP port unreachable on a connected socket; the final summary reports it
                 }
-                handle(buf, p.getLength());
+                int n = p.getLength();
+                if (shape != null) {
+                    if (QuicShape.isLongHeader(buf, n)) { answered = true; continue; }
+                    byte[] inner;
+                    try { inner = shape.unwrap(buf, n); } catch (java.security.GeneralSecurityException e) { continue; }
+                    if (inner == null) continue;
+                    handle(inner, inner.length);
+                } else {
+                    handle(buf, n);
+                }
+            }
+        }
+
+        /** Starts the fake connection: an Initial and a Handshake packet, resent a few times until the server answers. */
+        void openQuic(String sni) throws IOException {
+            try {
+                byte[][] flight = shape.firstFlight(sni);
+                for (int i = 0; i < 4 && !answered && !cancelled; i++) {
+                    for (byte[] f : flight) { try { sock.send(new DatagramPacket(f, f.length)); } catch (IOException ignored) { } }
+                    long end = System.nanoTime() + 500_000_000L;
+                    while (System.nanoTime() < end && !answered && !cancelled) sleep(20);
+                }
+            } catch (java.security.GeneralSecurityException e) {
+                throw new IOException("QUIC shape failed: " + e.getMessage());
+            }
+        }
+
+        /** Sends one probe packet, inside the QUIC wrapper when that is on. */
+        void tx(byte[] buf, int len) throws IOException {
+            if (shape == null) { sock.send(new DatagramPacket(buf, len)); return; }
+            try {
+                byte[] w = shape.wrap(buf, len);
+                sock.send(new DatagramPacket(w, w.length));
+            } catch (java.security.GeneralSecurityException e) {
+                throw new IOException(e.getMessage());
             }
         }
 
@@ -170,12 +212,12 @@ final class LinkProbe {
         Result phase(Phase ph, int idx, int phases, Listener l) throws IOException {
             int n = ph.packets();
             Cur c = new Cur(new Random().nextInt(), n);
-            byte[] buf = new byte[ph.size];
+            // with the QUIC wrapper the packet on the wire is ph.size bytes too, so the probe packet inside is smaller
+            byte[] buf = new byte[shape != null ? Math.max(MIN_SIZE, ph.size - QuicShape.OVERHEAD) : ph.size];
             new Random().nextBytes(buf);
             System.arraycopy(MAGIC, 0, buf, 0, 4);
             ByteBuffer b = ByteBuffer.wrap(buf);
             b.put(4, (byte) DATA).putInt(5, c.sid);
-            DatagramPacket pkt = new DatagramPacket(buf, buf.length);
             cur = c;
 
             long interval = 1_000_000_000L / ph.pps, start = System.nanoTime(), lastReport = 0;
@@ -185,7 +227,7 @@ final class LinkProbe {
                 int burst = 0;
                 while (sent < n && now >= start + sent * interval && burst < 64) {
                     b.putInt(9, sent).putLong(13, System.nanoTime()).putInt(21, 0);
-                    try { sock.send(pkt); } catch (IOException e) { errors++; }
+                    try { tx(buf, buf.length); } catch (IOException e) { errors++; }
                     sent++; burst++;
                     now = System.nanoTime();
                 }
@@ -218,11 +260,10 @@ final class LinkProbe {
             System.arraycopy(MAGIC, 0, fin, 0, 4);
             ByteBuffer b = ByteBuffer.wrap(fin);
             b.put(4, (byte) FIN).putInt(5, c.sid).putInt(13, c.n);
-            DatagramPacket pkt = new DatagramPacket(fin, fin.length);
             for (int ch = 0; ch < chunks && !cancelled; ch++) {
                 b.putInt(9, ch);
                 for (int attempt = 0; attempt < 12 && !c.summary.containsKey(ch) && !cancelled; attempt++) {
-                    try { sock.send(pkt); } catch (IOException ignored) { }
+                    try { tx(fin, fin.length); } catch (IOException ignored) { }
                     long deadline = System.nanoTime() + 700_000_000L;
                     while (System.nanoTime() < deadline && !c.summary.containsKey(ch)) sleep(15);
                 }
