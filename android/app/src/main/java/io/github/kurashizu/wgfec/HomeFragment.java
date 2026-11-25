@@ -101,6 +101,13 @@ public class HomeFragment extends Fragment {
             Profile p = it.parsed();
             b.profInfo.setText(p == null ? "This profile is not valid." : p.detail());
             Ui.modeBadge(b.profMode, p);
+            // FEC level of a profile that offers several: what it is set to, and a tap opens its link test to change it
+            if (p != null && p.hasTiers()) {
+                String lab = Tuning.label(p, Tuning.get(requireContext(), it.id));
+                b.profLevel.setText("FEC level: " + (lab == null ? "profile's own settings" : lab));
+                b.profLevel.setVisibility(View.VISIBLE);
+                b.profLevel.setOnClickListener(v -> ((MainActivity) requireActivity()).openLinkTest(it.id));
+            } else b.profLevel.setVisibility(View.GONE);
         }
         b.change.setEnabled(!TunnelService.running());
 

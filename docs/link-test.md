@@ -10,24 +10,22 @@ cannot be repaired at the measured loss rate. Results can be copied or shared as
 
 Presets: Quick (about 6 MB, 25 s), Standard (about 15 MB, 1 min), Thorough (about 34 MB, 2.5 min). The data use is shown in the app.
 
-## Test and tune (FEC levels)
+## Choosing the FEC level (profiles with levels)
 
-When the active profile came from a server that offers FEC levels (the app string has a `tiers` list, see
-[app-string.md](app-string.md)), the button reads **Test and tune**. After the measurement the app picks a level for
-each direction on its own and applies it:
+When the profile came from a server that offers FEC levels (the app string has a `tiers` list, see
+[app-string.md](app-string.md)), the **FEC level** card under the test lets you pick a level for each direction:
 
 - **Downlink** (server to phone): the level whose server port the app connects to.
 - **Uplink** (phone to server): the level whose uplink FEC table the app passes to its own `speederv2`.
 
-The two directions are chosen independently from their own measured loss. A level is meant for "up to about N %" loss;
-the app asks for 1.6 times the measured loss (and at least 1 point more), and moves up one level for a direction whose
-losses come in bursts. With no loss it picks the weakest level, which costs the least extra traffic.
+Each direction can be set to a level or left at **Profile's own settings**. **Apply** stores the choice for this profile;
+**Reset** goes back to the profile's own settings in both directions. **Nothing changes by itself**: the test only shows a
+suggestion (the weakest level that covers 1.6 times the measured loss of each direction, one level higher when losses
+come in bursts), and **Use the suggestion** applies it only when you tap it. A stronger level repairs more loss but sends
+more traffic.
 
-The choice is remembered per profile and shown on the Home screen and in the **FEC level** card. If the tunnel is up,
-only the `speederv2` helper is restarted, so the VPN stays connected. **Use the profile's own settings** goes back to the
-settings in the app string. The test always runs against the profile's own server, so its result belongs to that profile and nothing else.
-
-Nothing runs by itself: the level changes only when you tap the button.
+The choice is remembered per profile and shown on the Home screen ("down Light, up Balanced"). If that profile is
+connected, only the `speederv2` helper restarts and the VPN stays up; otherwise it applies the next time you connect.
 
 ## Server side
 

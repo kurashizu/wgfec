@@ -14,8 +14,8 @@ android {
         applicationId = "io.github.kurashizu.wgfec"
         minSdk = 26
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.3.1"
+        versionCode = 6
+        versionName = "0.4.0"
         ndk { abiFilters += listOf("arm64-v8a") }
     }
     compileOptions {

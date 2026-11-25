@@ -27,7 +27,7 @@ seen by applications down to about 1% in our tests (see [docs/findings.md](docs/
 - **Web admin** (English, password protected, listens on localhost only): create devices, show configs, per-device
   connection type, edit the FEC levels and the default level, view logs, service control.
 - **Two connection types per device:** direct WireGuard, or WireGuard over FEC.
-- **FEC levels:** five ready-made levels (from about 3% to about 55% link loss), each on its own UDP port; the app tests the link and switches by itself.
+- **FEC levels:** five ready-made levels (from about 3% to about 55% link loss), each on its own UDP port; you choose them per direction in the app, and its link test suggests one.
 - **Port forwarding** on the hub: publish a TCP/UDP port to any WireGuard device, or to an address on a LAN behind a device.
 - **Android app** (Android 8+): works with FEC profiles and with plain WireGuard profiles; profiles, one-tap connect, notification and quick-settings tile, traffic and handshake
   stats, log viewer. Import with one copy and paste of an **app string** from the admin page.

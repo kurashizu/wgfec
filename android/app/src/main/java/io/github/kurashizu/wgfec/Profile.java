@@ -80,8 +80,10 @@ final class Profile {
 
     /** The speederv2 arguments for a chosen uplink and downlink level (null choice: as pasted). */
     List<String> speederArgsFor(Tuning.Choice c) {
-        if (c == null || !hasTiers() || c.up < 0 || c.up >= tiers.size() || c.down < 0 || c.down >= tiers.size()) return speederArgs;
-        return FecTuner.applyTiers(speederArgs, tiers.get(c.up), tiers.get(c.down));
+        if (c == null || !hasTiers()) return speederArgs;
+        FecTuner.Tier up = c.up >= 0 && c.up < tiers.size() ? tiers.get(c.up) : null;
+        FecTuner.Tier down = c.down >= 0 && c.down < tiers.size() ? tiers.get(c.down) : null;
+        return FecTuner.applyTiers(speederArgs, up, down);
     }
 
     private static void parseTiers(Profile p, String json) {
@@ -115,7 +117,7 @@ final class Profile {
     String describe() {
         return hasFec()
                 ? "Mode: FEC (WireGuard through speederv2)\nFEC setting: " + (fec.isEmpty() ? "default" : fec) + "\nServer: " + server
-                + (hasTiers() ? "\nFEC levels: " + tiers.size() + " (" + tiers.get(0).name + " to " + tiers.get(tiers.size() - 1).name + "), tuned from the Debug tab" : "")
+                + (hasTiers() ? "\nFEC levels: " + tiers.size() + " (" + tiers.get(0).name + " to " + tiers.get(tiers.size() - 1).name + "), chosen from the Debug tab" : "")
                 : "Mode: Direct (plain WireGuard, no FEC)\nServer: " + server;
     }
 

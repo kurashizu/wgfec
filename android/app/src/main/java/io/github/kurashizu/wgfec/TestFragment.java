@@ -42,6 +42,8 @@ public class TestFragment extends Fragment {
 
     private FragmentTestBinding b;
     private String selectedId = "";
+    private String pickFor = "";                 // the profile the two level pickers were filled for
+    private int selUp = -1, selDown = -1;          // what the pickers show; -1 = as the profile has it
     private final List<Store.Item> items = new ArrayList<>();
     private final Runnable listener = this::render;
 
@@ -62,15 +64,11 @@ public class TestFragment extends Fragment {
         });
         b.share.setOnClickListener(v -> startActivity(Intent.createChooser(
                 new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, exportText()), "Share results")));
-        b.tuneReset.setOnClickListener(v -> {
-            Store.Item it = selected();
-            if (it != null) {
-                Tuning.clear(requireContext(), it.id);
-                Store.Item act = Store.active(requireContext());
-                if (act != null && act.id.equals(it.id)) TunnelService.retune(requireContext());
-            }
-            render();
-        });
+        b.downPick.setOnItemClickListener((parent, v, pos, id) -> { selDown = pos - 1; renderTuneButtons(); });
+        b.upPick.setOnItemClickListener((parent, v, pos, id) -> { selUp = pos - 1; renderTuneButtons(); });
+        b.tuneApply.setOnClickListener(v -> applyLevels(selUp, selDown));
+        b.tuneReset.setOnClickListener(v -> applyLevels(-1, -1));
+        b.tuneSuggest.setOnClickListener(v -> applyLevels(ProbeRunner.suggestUp, ProbeRunner.suggestDown));
         renderPlan();
         return b.getRoot();
     }
@@ -162,20 +160,64 @@ public class TestFragment extends Fragment {
         else getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
-    /** The card that says which FEC level the selected profile uses. Only for profiles that have several levels. */
+    /** Fills the two pickers for the selected profile (once per profile, so a half-made choice is not overwritten). */
+    private void loadPickers(Store.Item it, Profile p, boolean force) {
+        if (!force && it.id.equals(pickFor)) return;
+        pickFor = it.id;
+        Tuning.Choice c = Tuning.get(requireContext(), it.id);
+        selUp = c == null ? -1 : c.up;
+        selDown = c == null ? -1 : c.down;
+        List<String> names = new ArrayList<>();
+        names.add("Profile's own settings");
+        for (FecTuner.Tier t : p.tiers) names.add(t.name + " (up to about " + t.loss + " %)");
+        b.downPick.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, names));
+        b.upPick.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, names));
+        b.downPick.setText(names.get(selDown + 1 < names.size() ? selDown + 1 : 0), false);
+        b.upPick.setText(names.get(selUp + 1 < names.size() ? selUp + 1 : 0), false);
+    }
+
+    private void applyLevels(int up, int down) {
+        Store.Item it = selected();
+        if (it == null) return;
+        Tuning.set(requireContext(), it.id, up, down);
+        Store.Item act = Store.active(requireContext());
+        boolean live = TunnelService.running() && act != null && act.id.equals(it.id);
+        if (live) TunnelService.retune(requireContext());
+        Profile p = it.parsed();
+        String lab = p == null ? null : Tuning.label(p, Tuning.get(requireContext(), it.id));
+        Toast.makeText(requireContext(), (lab == null ? "Using the profile's own settings" : "Set: " + lab) + (live ? " (the tunnel stays up)" : ""), Toast.LENGTH_SHORT).show();
+        pickFor = "";
+        render();
+    }
+
+    private void renderTuneButtons() {
+        Store.Item it = selected();
+        Tuning.Choice c = it == null ? null : Tuning.get(requireContext(), it.id);
+        int storedUp = c == null ? -1 : c.up, storedDown = c == null ? -1 : c.down;
+        b.tuneApply.setEnabled(selUp != storedUp || selDown != storedDown);
+        b.tuneReset.setEnabled(c != null || selUp >= 0 || selDown >= 0);
+    }
+
+    /** The card where the user picks the FEC level of the selected profile, per direction. Only for profiles that offer levels. */
     private void renderTune() {
         Store.Item it = selected();
         Profile p = it == null ? null : it.parsed();
         if (p == null || !p.hasTiers()) { b.tuneCard.setVisibility(View.GONE); return; }
+        loadPickers(it, p, false);
         Tuning.Choice c = Tuning.get(requireContext(), it.id);
         String lab = Tuning.label(p, c);
         b.tuneCard.setVisibility(View.VISIBLE);
-        StringBuilder levels = new StringBuilder();
-        for (FecTuner.Tier t : p.tiers) levels.append(levels.length() == 0 ? "" : ", ").append(t.name);
-        b.tuneText.setText(lab == null ? "Not tuned: using the profile's own settings." : "Using " + lab + ".");
-        b.tuneHint.setText((lab == null ? "" : "Set by a test " + Fmt.ago(c.at) + ". ") + "Levels: " + levels + ". \"Test and tune\" measures this profile's link and picks the level for each direction itself.");
-        b.tuneReset.setVisibility(lab == null ? View.GONE : View.VISIBLE);
+        b.tuneText.setText(lab == null ? "Using the profile's own settings in both directions." : "Set to " + lab + ".");
+        b.tuneHint.setText("Nothing changes by itself: this changes only when you tap Apply. A stronger level repairs more loss but sends more traffic. "
+                + (TunnelService.running() ? "If this profile is connected, only its FEC helper restarts and the tunnel stays up." : "It takes effect the next time you connect."));
+        boolean sug = !running() && ProbeRunner.suggestId.equals(it.id) && ProbeRunner.suggestMsg != null;
+        b.suggestText.setVisibility(sug ? View.VISIBLE : View.GONE);
+        b.suggestText.setText(sug ? ProbeRunner.suggestMsg : "");
+        b.tuneSuggest.setVisibility(sug && ProbeRunner.suggestUp >= 0 && ProbeRunner.suggestDown >= 0 ? View.VISIBLE : View.GONE);
+        renderTuneButtons();
     }
+
+    private static boolean running() { return ProbeRunner.running; }
 
     private void card(String title, String body) {
         ItemProbeCardBinding c = ItemProbeCardBinding.inflate(getLayoutInflater(), b.results, false);
@@ -189,7 +231,7 @@ public class TestFragment extends Fragment {
         boolean running = ProbeRunner.running;
         keepAwake(running);
         Profile p = selectedProfile();
-        b.start.setText(running ? "Stop" : p != null && p.hasTiers() ? "Test and tune" : "Start test");
+        b.start.setText(running ? "Stop" : "Start test");
         b.start.setEnabled(running || p != null);
         renderTarget();
         renderTune();
@@ -217,7 +259,6 @@ public class TestFragment extends Fragment {
         for (int i = 0; i < rs.size(); i++) card(who + "Phase " + (i + 1) + ":  " + ProbeReport.title(rs.get(i)), ProbeReport.body(rs.get(i)));
         if (!rs.isEmpty() && !running) {
             card(who + "Verdict", ProbeReport.verdict(rs));
-            if (ProbeRunner.tuneMsg != null) card("FEC level", ProbeRunner.tuneMsg);
         }
         b.actions.setVisibility(rs.isEmpty() ? View.GONE : View.VISIBLE);
     }

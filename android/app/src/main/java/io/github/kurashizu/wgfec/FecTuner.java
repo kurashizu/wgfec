@@ -40,17 +40,24 @@ final class FecTuner {
         return pick;
     }
 
-    /** The client arguments with the uplink settings of {@code up} and the server port of {@code down}. */
+    /**
+     * The client arguments with the uplink settings of {@code up} and the server port of {@code down}. A null level leaves
+     * that direction as the arguments already have it.
+     */
     static List<String> applyTiers(List<String> args, Tier up, Tier down) {
         List<String> out = new ArrayList<>(args);
-        String remote = valueOf(out, "-r");
-        String host = remote == null ? null : remote.contains(":") ? remote.substring(0, remote.lastIndexOf(':')) : remote;
-        if (host != null) setFlag(out, "-r", host + ":" + down.port);
-        setFlag(out, "-f", up.upFec);
-        setFlag(out, "--timeout", String.valueOf(up.upTimeout));
-        setFlag(out, "-i", String.valueOf(up.upInterval));
-        setFlag(out, "--decode-buf", String.valueOf(down.decodeBuf));
-        setFlag(out, "--sock-buf", String.valueOf(down.sockBuf));
+        if (down != null) {
+            String remote = valueOf(out, "-r");
+            String host = remote == null ? null : remote.contains(":") ? remote.substring(0, remote.lastIndexOf(':')) : remote;
+            if (host != null) setFlag(out, "-r", host + ":" + down.port);
+            setFlag(out, "--decode-buf", String.valueOf(down.decodeBuf));
+            setFlag(out, "--sock-buf", String.valueOf(down.sockBuf));
+        }
+        if (up != null) {
+            setFlag(out, "-f", up.upFec);
+            setFlag(out, "--timeout", String.valueOf(up.upTimeout));
+            setFlag(out, "-i", String.valueOf(up.upInterval));
+        }
         return out;
     }
 

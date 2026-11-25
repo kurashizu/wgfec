@@ -21,8 +21,9 @@ final class ProbeRunner {
     static volatile String host = "", stage = "", profileName = "";
     static volatile int port, phase, phases, sent, total, echoes;
     static volatile String error;
-    /** What the last test switched the FEC level to, or why it did not. Null when the test was not meant to tune. */
-    static volatile String tuneMsg;
+    /** What the last test suggests for one profile (indexes into its levels, -1 for none), and the text to show. Never applied by itself. */
+    static volatile String suggestId = "", suggestMsg;
+    static volatile int suggestUp = -1, suggestDown = -1;
     static volatile boolean cancelled;
     static volatile List<LinkProbe.Result> results = new ArrayList<>();
     private static LinkProbe probe;
@@ -30,8 +31,7 @@ final class ProbeRunner {
     /** Runs a test. With a profile (and its id), the FEC level of that profile is chosen from the result and applied. */
     static synchronized boolean start(Context ctx, String profileId, String name, Profile profile, List<LinkProbe.Phase> plan) {
         if (running) return false;
-        Context app = ctx.getApplicationContext();
-        running = true; cancelled = false; error = null; tuneMsg = null; results = new ArrayList<>();
+        running = true; cancelled = false; error = null; suggestId = ""; suggestMsg = null; suggestUp = suggestDown = -1; results = new ArrayList<>();
         String h = profile.serverHost();
         int p = profile.linkTestPort();
         host = h; port = p; profileName = name; phase = 0; phases = plan.size(); sent = total = echoes = 0; stage = "starting";
@@ -55,7 +55,7 @@ final class ProbeRunner {
             } catch (Exception e) {
                 error = e.getMessage() != null ? e.getMessage() : e.toString();
             } finally {
-                if (profile.hasTiers() && !cancelled && error == null && !results.isEmpty()) tune(app, profileId, profile);
+                if (profile.hasTiers() && !cancelled && error == null && !results.isEmpty()) suggest(profileId, profile);
                 running = false;
                 changed();
             }
@@ -66,18 +66,17 @@ final class ProbeRunner {
         return true;
     }
 
-    private static void tune(Context ctx, String id, Profile p) {
+    /** A level for each direction that fits what the test measured. It is only offered to the user, never applied. */
+    private static void suggest(String id, Profile p) {
         List<LinkProbe.Result> rs = results;
-        if (!ProbeReport.measured(rs)) { tuneMsg = "The FEC level was not changed: the server's record did not arrive, so the two directions could not be told apart."; return; }
+        suggestId = id; suggestUp = suggestDown = -1; suggestMsg = null;
+        if (!ProbeReport.measured(rs)) { suggestMsg = "No suggestion: the server's record did not arrive, so the two directions could not be told apart."; return; }
         double lu = ProbeReport.lossOf(rs, true), ld = ProbeReport.lossOf(rs, false);
-        int up = FecTuner.pick(p.tiers, lu, ProbeReport.burstyDir(rs, true)), down = FecTuner.pick(p.tiers, ld, ProbeReport.burstyDir(rs, false));
-        if (up < 0 || down < 0) return;
-        Tuning.set(ctx, id, up, down);
-        Store.Item act = Store.active(ctx);
-        boolean live = TunnelService.running() && act != null && act.id.equals(id);      // only the profile that is connected restarts its helper
-        if (live) TunnelService.retune(ctx);
-        tuneMsg = String.format(java.util.Locale.US, "Switched to downlink %s (measured %.2f %%) and uplink %s (measured %.2f %%).%s",
-                p.tiers.get(down).name, ld, p.tiers.get(up).name, lu, live ? " The FEC helper was restarted with the new settings; the tunnel stayed up." : " It applies the next time you connect.");
+        suggestUp = FecTuner.pick(p.tiers, lu, ProbeReport.burstyDir(rs, true));
+        suggestDown = FecTuner.pick(p.tiers, ld, ProbeReport.burstyDir(rs, false));
+        if (suggestUp < 0 || suggestDown < 0) { suggestUp = suggestDown = -1; return; }
+        suggestMsg = String.format(java.util.Locale.US, "Suggested by this test: downlink %s (measured %.2f %%), uplink %s (measured %.2f %%).",
+                p.tiers.get(suggestDown).name, ld, p.tiers.get(suggestUp).name, lu);
     }
 
     static void stop() {

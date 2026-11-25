@@ -44,8 +44,27 @@
             android:textAppearance="?attr/textAppearanceBodyMedium"/>
         <TextView android:id="@+id/tuneHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="4dp"
             android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
-        <com.google.android.material.button.MaterialButton android:id="@+id/tuneReset" style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Use the profile's own settings"/>
+        <com.google.android.material.textfield.TextInputLayout style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:hint="Downlink (server to phone)">
+          <com.google.android.material.textfield.MaterialAutoCompleteTextView android:id="@+id/downPick"
+              android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="none"/>
+        </com.google.android.material.textfield.TextInputLayout>
+        <com.google.android.material.textfield.TextInputLayout style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="Uplink (phone to server)">
+          <com.google.android.material.textfield.MaterialAutoCompleteTextView android:id="@+id/upPick"
+              android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="none"/>
+        </com.google.android.material.textfield.TextInputLayout>
+        <TextView android:id="@+id/suggestText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="10dp"
+            android:visibility="gone" android:textAppearance="?attr/textAppearanceBodyMedium"/>
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:layout_marginTop="10dp">
+          <com.google.android.material.button.MaterialButton android:id="@+id/tuneApply" android:layout_width="0dp" android:layout_height="wrap_content"
+              android:layout_weight="1" android:text="Apply"/>
+          <com.google.android.material.button.MaterialButton android:id="@+id/tuneReset" style="@style/Widget.Material3.Button.TonalButton"
+              android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="8dp" android:text="Reset"/>
+        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/tuneSuggest" style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Use the suggestion"
+            android:visibility="gone"/>
       </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 
