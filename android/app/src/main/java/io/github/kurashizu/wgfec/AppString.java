@@ -13,7 +13,7 @@ import java.util.zip.InflaterInputStream;
  *   wgfec://1/<base64url(JSON)>          plain
  *   wgfec://1z/<base64url(zlib(JSON))>   compressed
  * JSON: {"v":1, "name":"...", "wg":"<WireGuard config>", "sp":"<speederv2 client command>" (absent = direct tunnel),
- *        "u2r":"<udp2raw client command>" (needs root; not supported by this app)}
+ *        "tiers":[{n,l,p,u,t,i,d,s}, ...] (optional: the server's FEC levels, weakest first)}
  */
 final class AppString {
     static final String SCHEME = "wgfec://";
@@ -46,11 +46,11 @@ final class AppString {
         if (o.optInt("v", 0) != 1) throw new Exception("Unsupported app string version " + o.optInt("v", 0) + ". Update the app.");
         String wg = o.optString("wg", "");
         if (!wg.contains("[Interface]") || !wg.contains("[Peer]")) throw new Exception("The app string has no WireGuard config.");
-        if (o.has("u2r") && !o.optString("u2r").isEmpty())
-            throw new Exception("This device uses fake-TCP (udp2raw), which needs root and is not supported by the app. Pick Direct or FEC on the admin page.");
         String sp = o.optString("sp", "");
         StringBuilder t = new StringBuilder(wg.trim()).append('\n');
         if (!sp.isEmpty()) t.append('\n').append(sp.trim()).append('\n');
+        org.json.JSONArray tiers = o.optJSONArray("tiers");
+        if (!sp.isEmpty() && tiers != null && tiers.length() > 0) t.append(Profile.TIERS_PREFIX).append(' ').append(tiers.toString()).append('\n');
         String name = o.optString("name", "").replaceAll("[^\\w .@-]", "");
         return new AppString(name.isEmpty() ? "device" : name, t.toString(), !sp.isEmpty());
     }

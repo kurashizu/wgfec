@@ -36,21 +36,18 @@ TLS_CERT = os.environ.get("WGWEB_TLS_CERT")
 TLS_KEY = os.environ.get("WGWEB_TLS_KEY")
 WG_PEER = ["sudo", "-n", "/usr/local/sbin/wg-peer"]
 WG_ADMIN = ["sudo", "-n", "/usr/local/sbin/wg-admin"]
-LOG_SOURCES = ("wg-service", "speeder", "faketcp", "web-ui")
+LOG_SOURCES = ("wg-service", "speeder", "web-ui")
 SERVICE_ACTIONS = ("start", "stop", "restart")
 
 # UDPspeeder FEC front for wg0 (wg-speeder.service). Settings live in an env file
 # readable by this user's supplementary group; the key is only shown to a logged-in admin.
 SPEEDER_ENV = "/etc/wg-speeder/speeder.env"
+LEVELS_FILE = "/etc/wg-speeder/levels.json"
+LEVEL_UNIT = "wg-speeder-level@%s.service"
 SPEEDER_HOST = os.environ.get("WGWEB_ENDPOINT_HOST", "wg.example.com")   # same host as the WG endpoint
 SPEEDER_LOCAL_PORT = 51821      # where the client-side speederv2 listens on 127.0.0.1
 SPEEDER_CLIENT_MTU = 1280       # IPv6 needs at least 1280 on the interface; mode 0 splits/merges packets into shards
-# udp2raw (fake-TCP) fronts: wg-u2r.service forwards to WireGuard, wg-u2r-fec.service to the speederv2 port.
-U2R_LOCAL_PORT = 51822          # client side, udp2raw alone: WireGuard talks to this
-U2R_FEC_LOCAL_PORT = 51823      # client side, udp2raw in front of speederv2
-U2R_CIPHERS = ("xor", "aes128cbc", "aes128cfb")
-U2R_AUTHS = ("none", "crc32", "simple", "md5", "hmac_sha1")
-VIA_MODES = ("direct", "speeder", "faketcp", "speeder-faketcp")
+VIA_MODES = ("direct", "speeder")
 
 SESSION_TTL = 12 * 3600
 COOKIE = "wgsid"
@@ -74,6 +71,43 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
 
 
 # ---------------------------------------------------------------- udpspeeder
+def levels_info():
+    """The FEC levels (see wg-admin) with the state of each level's service, or None when levels are not set up."""
+    try:
+        with open(LEVELS_FILE) as f:
+            d = json.load(f)
+        levels = d["levels"]
+        for l in levels:
+            if not (re.fullmatch(r"[a-z]{3,16}", l["id"]) and isinstance(l["port"], int) and isinstance(l["loss"], int)):
+                return None
+        default = d["default"]
+        if not any(l["id"] == default for l in levels):
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    units = [LEVEL_UNIT % l["id"] for l in levels if l.get("instance")]
+    states = {}
+    if units:
+        try:
+            out = subprocess.run(["systemctl", "is-active"] + units, capture_output=True, text=True, timeout=5).stdout.split()
+            states = dict(zip(units, out))
+        except Exception:
+            pass
+    for l in levels:
+        l["state"] = states.get(LEVEL_UNIT % l["id"], "unknown") if l.get("instance") else "n/a"
+    return {"default": default, "levels": levels}
+
+
+def tiers_for_app(info):
+    """The levels the Android app may switch between, weakest first: where to connect and the uplink settings to use."""
+    out = []
+    for l in (info.get("levels") or []):
+        if l.get("auto") and l.get("instance") and l.get("state") == "active":
+            out.append({"n": l["name"], "l": l["loss"], "p": l["port"], "u": l["up"]["fec"], "t": l["up"]["timeout"],
+                        "i": l["up"]["interval"], "d": l["db"], "s": l["sb"]})
+    return sorted(out, key=lambda t: t["l"])
+
+
 def speeder_info():
     """Settings of the server-side speederv2, or None when it is not configured."""
     try:
@@ -107,23 +141,9 @@ def speeder_info():
     fec_up = env.get("SPEEDER_FEC_UP", fec)
     if not re.match(r"^[0-9:,]{1,300}$", fec_up):
         fec_up = fec
-    u2r = None
-    try:
-        ukey, uport, uport_fec = env["U2R_KEY"], int(env["U2R_PORT"]), int(env["U2R_PORT_FEC"])
-        cipher, auth = env.get("U2R_CIPHER", "aes128cbc"), env.get("U2R_AUTH", "hmac_sha1")
-        if re.match(r"^[A-Za-z0-9]{8,64}$", ukey) and cipher in U2R_CIPHERS and auth in U2R_AUTHS \
-                and 0 < uport < 65536 and 0 < uport_fec < 65536:
-            def state(unit):
-                try:
-                    return subprocess.run(["systemctl", "is-active", unit], capture_output=True,
-                                          text=True, timeout=5).stdout.strip()
-                except Exception:
-                    return "unknown"
-            u2r = {"key": ukey, "port": uport, "port_fec": uport_fec, "cipher": cipher, "auth": auth,
-                   "active": state("wg-u2r"), "active_fec": state("wg-u2r-fec")}
-    except (KeyError, ValueError):
-        pass
-    return {"key": key, "port": port, "fec": fec, "timeout": timeout, "interval": interval, "u2r": u2r,
+    li = levels_info()
+    return {"key": key, "port": port, "fec": fec, "timeout": timeout, "interval": interval,
+            "levels": li["levels"] if li else None, "default_level": li["default"] if li else None,
             "fec_up": fec_up, "timeout_up": num("SPEEDER_TIMEOUT_UP", timeout),
             "interval_up": num("SPEEDER_INTERVAL_UP", interval),
             "fec_mtu": num("SPEEDER_MTU"), "decode_buf": num("SPEEDER_DECODE_BUF"), "sock_buf": num("SPEEDER_SOCK_BUF"),
@@ -140,10 +160,8 @@ def resolve_v4(host):
         return host
 
 
-def speeder_client_cmd(info, host, remote=None):
-    """remote = (ip, port) overrides the server address, used when speederv2 talks to a local udp2raw."""
-    host = resolve_v4(host)
-    rhost, rport = remote if remote else (host, info["port"])
+def speeder_client_cmd(info, host):
+    rhost, rport = resolve_v4(host), info["port"]
     # The client only encodes the UPLINK, so it gets the uplink settings; the server's -f covers the downlink.
     cmd = ("speederv2 -c -l127.0.0.1:%d -r%s:%d -k %s -f%s --timeout %d -i %d --mode 0"
            % (SPEEDER_LOCAL_PORT, rhost, rport, info["key"], info.get("fec_up", info["fec"]),
@@ -188,41 +206,23 @@ def exclude_server_route(config, server_ip):
     return config[:m.start(1)] + ", ".join(new) + config[m.end(1):]
 
 
-def u2r_client_cmd(info, host, fec):
-    u = info["u2r"]
-    return ("udp2raw -c -l127.0.0.1:%d -r%s:%d -k %s --raw-mode faketcp --cipher-mode %s --auth-mode %s -a --keep-rule"
-            % (U2R_FEC_LOCAL_PORT if fec else U2R_LOCAL_PORT, resolve_v4(host),
-               u["port_fec"] if fec else u["port"], u["key"], u["cipher"], u["auth"]))
-
-
-def client_cmds(info, host, via):
-    """The client-side programs a connection type needs, in the order they have to be started."""
-    if via == "speeder":
-        return {"speeder": speeder_client_cmd(info, host), "u2r": None, "port": SPEEDER_LOCAL_PORT}
-    if via == "faketcp":
-        return {"speeder": None, "u2r": u2r_client_cmd(info, host, False), "port": U2R_LOCAL_PORT}
-    return {"speeder": speeder_client_cmd(info, host, ("127.0.0.1", U2R_FEC_LOCAL_PORT)),
-            "u2r": u2r_client_cmd(info, host, True), "port": SPEEDER_LOCAL_PORT}
+def client_cmds(info, host, via="speeder"):
+    """The client-side program a connection type needs."""
+    return {"speeder": speeder_client_cmd(info, host), "port": SPEEDER_LOCAL_PORT}
 
 
 def via_ready(info, via):
     """None when the connection type can be offered, otherwise the reason it cannot."""
     if via == "direct":
         return None
-    if via in ("faketcp", "speeder-faketcp") and not info.get("u2r"):
-        return "The faketcp (udp2raw) service is not configured on this server"
-    if via in ("speeder", "speeder-faketcp") and info["active"] != "active":
+    if info["active"] != "active":
         return "The UDPspeeder service is not running"
-    if via == "faketcp" and info["u2r"]["active"] != "active":
-        return "The faketcp (udp2raw) service is not running"
-    if via == "speeder-faketcp" and info["u2r"]["active_fec"] != "active":
-        return "The FEC + faketcp service is not running"
     return None
 
 
 def speeder_cmd_of(cmds):
-    """Legacy single-command field: the command a plain speederv2 setup would need."""
-    return cmds.get("speeder") or cmds.get("u2r")
+    """Legacy single-command field: the command a plain speederv2 setup needs."""
+    return cmds.get("speeder")
 
 
 def speederize(config, info, via="speeder"):
@@ -346,6 +346,8 @@ def call_backend(cmd, *args, timeout=30):
     if p.returncode == 0:
         return 200, data
     msg = data.get("error", "Backend error")
+    if msg.startswith("levels: "):
+        return 400, {"error": msg[len("levels: "):][:200]}          # sanitised by wg-admin
     if "already exists" in msg:
         return 409, {"error": "A device with this name already exists"}
     if "invalid name" in msg:
@@ -465,7 +467,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             info = speeder_info()
             if not info:
                 return self.send_json(200, {"enabled": False})
-            avail = ["speeder"] + (["faketcp", "speeder-faketcp"] if info.get("u2r") else [])
+            avail = ["speeder"]
             return self.send_json(200, dict(
                 info, enabled=True, local_port=SPEEDER_LOCAL_PORT, mtu=SPEEDER_CLIENT_MTU,
                 cmd=speeder_client_cmd(info, SPEEDER_HOST),
@@ -505,6 +507,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     try:
                         data["config"], cmds, _ = speederize(data["config"], sinfo, via)
                         data["cmds"], data["speeder_cmd"], data["via"], data["speeder"] = cmds, speeder_cmd_of(cmds), via, True
+                        if via == "speeder" and tiers_for_app(sinfo):
+                            data["tiers"] = tiers_for_app(sinfo)
                     except ValueError:
                         return self.send_json(500, {"error": "Could not build the client config"})
                 sys.stderr.write("%s viewed config of %s (%s)\n" % (self.client_ip(), m.group(1), via))
@@ -550,24 +554,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             sys.stderr.write("%s service %s requested\n" % (self.client_ip(), action))
             status, data = call_wg_admin("service", action, timeout=100)
             return self.send_json(status, data)
-        if path == "/api/speeder/settings":
-            body = self.read_json() or {}
-            fields = (("fec", "SPEEDER_FEC", str), ("timeout", "SPEEDER_TIMEOUT", int), ("interval", "SPEEDER_INTERVAL", int),
-                      ("fec_up", "SPEEDER_FEC_UP", str), ("timeout_up", "SPEEDER_TIMEOUT_UP", int), ("interval_up", "SPEEDER_INTERVAL_UP", int),
-                      ("mtu", "SPEEDER_MTU", int), ("decode_buf", "SPEEDER_DECODE_BUF", int), ("sock_buf", "SPEEDER_SOCK_BUF", int))
-            pairs = []
-            for key, envk, typ in fields:
-                if key not in body:
-                    continue
-                v = body[key]
-                if isinstance(v, bool) or not isinstance(v, typ):
-                    return self.send_json(400, {"error": "Invalid value for %s" % key})
-                pairs.append("%s=%s" % (envk, v))
-            if not pairs:
-                return self.send_json(400, {"error": "Nothing to change"})
-            sys.stderr.write("%s changes FEC settings: %s\n" % (self.client_ip(), ", ".join(x.split("=")[0] for x in pairs)))
-            status, data = call_wg_admin("speeder-set", *pairs, timeout=90)
-            return self.send_json(status, data)
+        if path == "/api/speeder/levels":
+            body = self.read_json()
+            if not isinstance(body, dict) or set(body) - {"default", "mtu", "levels"}:
+                return self.send_json(400, {"error": "Invalid request"})
+            raw = json.dumps(body, separators=(",", ":")).encode()
+            if len(raw) > 20000:
+                return self.send_json(400, {"error": "Request too large"})
+            sys.stderr.write("%s changes FEC levels (%s)\n" % (self.client_ip(), ", ".join(sorted(body))))
+            return self.send_json(*call_wg_admin("levels-set", base64.b64encode(raw).decode(), timeout=120))
         m = re.match(r"^/api/peers/([A-Za-z0-9_.-]{1,32})/mode$", path)
         if m:
             via = (self.read_json() or {}).get("via")

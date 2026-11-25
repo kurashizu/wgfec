@@ -1,6 +1,6 @@
 [Unit]
 Description=Port forwards to WireGuard devices (nftables table "ip portfwd", managed by wg-admin)
-After=network-online.target wg-u2r-fw.service
+After=network-online.target
 
 [Service]
 Type=oneshot

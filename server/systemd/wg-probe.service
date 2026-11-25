@@ -1,0 +1,26 @@
+[Unit]
+Description=net-probe UDP echo (the Link test in the wgfec app and tools/net-probe/probe.py talk to it)
+After=network.target
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/bin/python3 -I /opt/net-probe/probe_server.py --bind 0.0.0.0 --port 62933
+Restart=on-failure
+RestartSec=3
+# The server answers with a packet never longer than the one it got, drops floods per source IP and keeps
+# little state, so it is safe to leave open to the internet. These limits keep it from hurting a small host.
+MemoryMax=64M
+CPUQuota=25%
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

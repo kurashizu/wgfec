@@ -25,7 +25,7 @@ public class MainActivity extends AppCompatActivity {
         b.nav.setOnItemSelectedListener(item -> {
             int id = item.getItemId();
             Fragment f = id == R.id.nav_profiles ? new ProfilesFragment()
-                    : id == R.id.nav_log ? new LogFragment()
+                    : id == R.id.nav_debug ? new DebugFragment()
                     : id == R.id.nav_settings ? new SettingsFragment() : new HomeFragment();
             getSupportFragmentManager().beginTransaction().replace(R.id.container, f).commit();
             return true;
@@ -35,6 +35,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     void select(int navId) { b.nav.setSelectedItemId(navId); }
+
+    /** Open the Debug tab on its Log pane. */
+    void openLog() {
+        DebugFragment.pendingPane = "log";
+        select(R.id.nav_debug);
+    }
 
     /** Connect or disconnect, asking for the permissions the first time. */
     void toggle() {
@@ -79,7 +85,7 @@ public class MainActivity extends AppCompatActivity {
         if (AppString.looksLike(link)) {
             i.setData(null);
             select(R.id.nav_profiles);
-            Importer.offer(this, link, null);
+            Importer.offer(this, link, () -> getSupportFragmentManager().beginTransaction().replace(R.id.container, new ProfilesFragment()).commit());
         }
     }
 }

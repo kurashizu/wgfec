@@ -30,7 +30,7 @@ public class HomeFragment extends Fragment {
         b.powerBtn.setOnClickListener(v -> ((MainActivity) requireActivity()).toggle());
         b.change.setOnClickListener(v -> ((MainActivity) requireActivity()).select(R.id.nav_profiles));
         b.pasteFirst.setOnClickListener(v -> Importer.fromClipboard(requireActivity(), this::render));
-        b.errLog.setOnClickListener(v -> ((MainActivity) requireActivity()).select(R.id.nav_log));
+        b.errLog.setOnClickListener(v -> ((MainActivity) requireActivity()).openLog());
         return b.getRoot();
     }
 

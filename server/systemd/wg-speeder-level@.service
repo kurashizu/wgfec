@@ -1,0 +1,28 @@
+[Unit]
+Description=UDPspeeder FEC level %i (own UDP port, forwards to wg0 51820)
+After=network.target boringtun-wg0.service wg-quick@wg0.service
+
+[Service]
+User=wgspeeder
+Group=wgspeeder
+EnvironmentFile=/etc/wg-speeder/speeder.env
+EnvironmentFile=/etc/wg-speeder/level-%i.env
+ExecStart=/usr/local/bin/speederv2-wg -s -l0.0.0.0:${LEVEL_PORT} -r127.0.0.1:51820 -k ${SPEEDER_KEY} -f${LEVEL_FEC} --timeout ${LEVEL_TIMEOUT} -i ${LEVEL_INTERVAL} --mode 0 --mtu ${SPEEDER_MTU} --decode-buf ${LEVEL_DECODE_BUF} --sock-buf ${LEVEL_SOCK_BUF} --report 30 --disable-color
+Restart=on-failure
+RestartSec=3
+# Idle, one of these costs about 2 MB. The cap only matters when many devices use the same level.
+MemoryMax=128M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

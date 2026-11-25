@@ -9,7 +9,7 @@
  │   │ 127.0.0.1     │    │  └────────────┘   └───────────┘     and LANs they carry         │
  │ speederv2 (client)│───────▶ FEC-encoded UDP                                              │
  └───────────────────┘    │                                                                 │
-        optional: udp2raw (fake-TCP) in front of either hop, TCP 62935 / 62936               │
+        FEC levels: one more speederv2 per level, UDP 62940-62944                            │
                           │  wg-web (127.0.0.1:8788) ── sudo whitelist ──▶ wg-peer, wg-admin │
                           └─────────────────────────────────────────────────────────────────┘
 ```
@@ -18,10 +18,11 @@
 - **FEC.** The client's `speederv2` listens on `127.0.0.1`; WireGuard's endpoint is that local address. It duplicates
   or erasure-codes packets so the far end can rebuild lost ones. The cost is extra bandwidth and a little latency.
   The server's `speederv2` hands the decoded packets to WireGuard on `127.0.0.1:51820`.
-- **Fake-TCP.** `udp2raw` wraps UDP in hand-built TCP segments for networks that treat UDP badly. Needs raw sockets, and a real
-  layer-3 path: it does not work behind user-mode networking such as rootless podman's pasta.
-- **Connection types per device:** `direct`, `speeder`, `faketcp`, `speeder-faketcp`. The admin page generates the matching client config and commands.
+- **FEC levels.** Besides the main service (the *default level*, on UDP 62932) the server runs one `speederv2` per level on its own
+  port (62940-62944: aggressive, light, balanced, conservative, maximum). A device picks the downlink strength by choosing which
+  port it connects to, and the uplink strength with its own `-f`, so the server needs no control channel and no restart.
+- **Connection types per device:** `direct` or `speeder`. The admin page generates the matching client config and command.
 - **Admin web** (`app.py`): Python standard library only, localhost, password and session cookie. It never runs privileged
   code itself: it calls `wg-peer` and `wg-admin` through a fixed sudo whitelist.
-- **State:** `/etc/wireguard/wg0.conf` (devices), `/etc/wg-speeder/speeder.env` (FEC settings and keys),
+- **State:** `/etc/wireguard/wg0.conf` (devices), `/etc/wg-speeder/speeder.env` (key, ports, and the default level's FEC settings), `/etc/wg-speeder/levels.json` (the FEC levels),
   `/etc/wg-portfwd.json` (forwarding rules), `/etc/wg-web/config.json` (password hash).

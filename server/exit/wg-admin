@@ -4,8 +4,9 @@
 Usage:  wg-admin status
         wg-admin config
         wg-admin service start|stop|restart
-        wg-admin speeder-set KEY=VALUE ...      (FEC settings, see SPEEDER_FIELDS)
-        wg-admin logs wg-service|speeder|faketcp|web-ui [LINES]
+        wg-admin levels-init                    (create/complete the FEC levels and start their services)
+        wg-admin levels-set B64JSON             (change FEC levels / default level / packet size)
+        wg-admin logs wg-service|speeder|web-ui [LINES]
 Output is JSON on stdout. Errors: {"error": "..."} with exit code 1.
 Only the fixed unit/file names below can be touched; nothing from argv is used
 in a path or a command except the validated action / source keywords.
@@ -25,14 +26,13 @@ CONF = "/etc/wireguard/wg0.conf"
 PUBKEY_FILE = "/etc/wireguard/publickey"
 WG = "/usr/bin/wg"
 SPEEDER_UNIT = "wg-speeder.service"
-U2R_UNITS = ("wg-u2r.service", "wg-u2r-fec.service")
 LOCKFILE = "/run/wg-admin.lock"
 ENDPOINT = "wg.example.com:51820"   # CHANGE ME: public host:port clients connect to (server/scripts/configure.sh sets it)
 POOL_SIZE = 155                      # 10.99.0.100 - 10.99.0.254
 MAX_LINES, DEFAULT_LINES = 500, 100
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 SECRET_RE = re.compile(r"^(\s*(?:PrivateKey|PresharedKey)\s*=).*$", re.M)
-KEYARG_RE = re.compile(r"(\bkey=|\s-k\s+)\S+")          # udp2raw / speederv2 shared keys
+KEYARG_RE = re.compile(r"(\bkey=|\s-k\s+)\S+")          # speederv2 shared keys
 
 
 class Err(Exception):
@@ -157,34 +157,72 @@ def _fec(v):
     return v
 
 
-SPEEDER_FIELDS = {
-    "SPEEDER_FEC": _fec, "SPEEDER_FEC_UP": _fec,
-    "SPEEDER_TIMEOUT": _int_in(0, 1000), "SPEEDER_TIMEOUT_UP": _int_in(0, 1000),
-    "SPEEDER_INTERVAL": _int_in(0, 1000), "SPEEDER_INTERVAL_UP": _int_in(0, 1000),
-    "SPEEDER_MTU": _int_in(576, 1500), "SPEEDER_DECODE_BUF": _int_in(300, 20000), "SPEEDER_SOCK_BUF": _int_in(10, 10240),
-}
+# ---------------------------------------------------------------- FEC levels
+# The FEC tunnel has one set of parameters per "level" (how much loss it is meant to repair). Every automatic level runs
+# as its own speederv2 on its own UDP port, so a device chooses a level just by connecting to that port, and the server
+# never has to be told. The main service (wg-speeder) keeps serving the "default level" on the original port.
+LEVELS_FILE = "/etc/wg-speeder/levels.json"
+LEVEL_ENV = "/etc/wg-speeder/level-%s.env"
+LEVEL_UNIT = "wg-speeder-level@%s.service"
+LEVEL_PORT_BASE = 62940
+# id, name, link loss it is meant for (%), downlink (table, wait ms, interleave ms), uplink (same), decode buffer, socket buffer
+PRESETS = [
+    ("aggressive", "Aggressive", 3, ("1:1,2:1,5:1,10:1,20:2,40:3", 10, 0), ("1:1,2:1,4:1,8:1,16:1,32:1", 10, 0), 2000, 1024),
+    ("light", "Light", 10, ("1:2,2:2,5:3,10:4,20:7,40:10", 15, 0), ("1:1,2:1,4:1,8:1,16:2,32:3", 10, 0), 2000, 1024),
+    ("balanced", "Balanced", 25, ("1:3,2:5,4:6,8:9,16:14,32:22,48:30", 20, 2), ("1:1,2:1,4:1,8:2,16:3,32:5", 10, 0), 2000, 1024),
+    ("conservative", "Conservative", 40, ("1:6,2:8,3:10,5:13,8:16,12:21,16:25,24:33,32:41,48:55,64:69", 30, 5),
+     ("1:1,2:2,4:2,8:3,16:5,32:8", 10, 0), 6000, 2048),
+    ("maximum", "Maximum", 55, ("1:10,2:13,3:16,5:21,8:28,12:36,16:43,24:57,32:70,48:96,64:121,80:145", 40, 5),
+     ("1:2,2:2,4:3,8:4,16:6,32:9", 10, 0), 12000, 4096),
+]
+LEVEL_IDS = tuple(p[0] for p in PRESETS) + ("custom",)
+FEC_SIDE_KEYS = ("fec", "timeout", "interval")
 
 
-def _speeder_restarts():
-    out = run(["systemctl", "show", SPEEDER_UNIT, "-p", "NRestarts", "--value"], check=False).strip()
+def _parse_env(text):
+    env = {}
+    for line in text.splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            env[k.strip()] = v.strip()
+    return env
+
+
+def _read_env():
+    try:
+        with open(SPEEDER_ENV) as f:
+            text = f.read()
+        return text, os.stat(SPEEDER_ENV)
+    except OSError:
+        raise Err("the FEC service is not configured on this host")
+
+
+def _write_file(path, text, uid, gid, mode):
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chown(tmp, uid, gid)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def _restarts(unit):
+    out = run(["systemctl", "show", unit, "-p", "NRestarts", "--value"], check=False).strip()
     return int(out) if out.isdigit() else 0
 
 
-def cmd_speeder_set(args):
-    if not args or len(args) > len(SPEEDER_FIELDS):
-        raise Err("nothing to change")
-    new = {}
-    for a in args:
-        k, sep, v = a.partition("=")
-        if not sep or k not in SPEEDER_FIELDS or k in new:
-            raise Err("unknown or repeated setting")
-        new[k] = SPEEDER_FIELDS[k](v)
-    try:
-        with open(SPEEDER_ENV) as f:
-            old_text = f.read()
-        st = os.stat(SPEEDER_ENV)
-    except OSError:
-        raise Err("the FEC service is not configured on this host")
+def _all_active(units, before):
+    time.sleep(4)                           # longer than RestartSec: a crash loop shows up as a restart count
+    return all(run(["systemctl", "is-active", u], check=False).strip() == "active" and _restarts(u) == before[u] for u in units)
+
+
+def _speeder_apply(new):
+    """Write these SPEEDER_* settings into the main service's env file and restart it; put the old ones back if it will not run.
+    The caller holds the lock."""
+    old_text, st = _read_env()
     lines, seen = [], set()
     for ln in old_text.splitlines():
         k = ln.split("=", 1)[0].strip()
@@ -196,39 +234,206 @@ def cmd_speeder_set(args):
     for k in new:
         if k not in seen:
             lines.append("%s=%s" % (k, new[k]))
+    mode = st.st_mode & 0o777
+    _write_file(SPEEDER_PREV, old_text, st.st_uid, st.st_gid, mode)
+    before = {SPEEDER_UNIT: _restarts(SPEEDER_UNIT)}
+    _write_file(SPEEDER_ENV, "\n".join(lines) + "\n", st.st_uid, st.st_gid, mode)
+    run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+    if not _all_active([SPEEDER_UNIT], before):
+        _write_file(SPEEDER_ENV, old_text, st.st_uid, st.st_gid, mode)
+        run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+        raise Err("the FEC service would not run with these settings; the previous settings were restored")
+    return old_text
 
-    def write(text):
-        tmp = SPEEDER_ENV + ".tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chown(tmp, st.st_uid, st.st_gid)
-        os.chmod(tmp, st.st_mode & 0o777)
-        os.replace(tmp, SPEEDER_ENV)
+
+def _level_side(fec, timeout, interval):
+    return {"fec": _fec(str(fec)), "timeout": int(_int_in(0, 1000)(str(timeout))), "interval": int(_int_in(0, 1000)(str(interval)))}
+
+
+def _preset_level(i, p):
+    lid, name, loss, down, up, db, sb = p
+    return {"id": lid, "name": name, "loss": loss, "auto": True, "instance": True, "port": LEVEL_PORT_BASE + i,
+            "down": _level_side(*down), "up": _level_side(*up), "db": db, "sb": sb}
+
+
+def _levels_load():
+    try:
+        with open(LEVELS_FILE) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not isinstance(d.get("levels"), list) or d.get("default") not in LEVEL_IDS:
+        return None
+    return d
+
+
+def _level_env_text(lv):
+    return ("LEVEL_PORT=%d\nLEVEL_FEC=%s\nLEVEL_TIMEOUT=%d\nLEVEL_INTERVAL=%d\nLEVEL_DECODE_BUF=%d\nLEVEL_SOCK_BUF=%d\n"
+            % (lv["port"], lv["down"]["fec"], lv["down"]["timeout"], lv["down"]["interval"], lv["db"], lv["sb"]))
+
+
+def _main_pairs(lv):
+    return {"SPEEDER_FEC": lv["down"]["fec"], "SPEEDER_TIMEOUT": str(lv["down"]["timeout"]), "SPEEDER_INTERVAL": str(lv["down"]["interval"]),
+            "SPEEDER_FEC_UP": lv["up"]["fec"], "SPEEDER_TIMEOUT_UP": str(lv["up"]["timeout"]), "SPEEDER_INTERVAL_UP": str(lv["up"]["interval"]),
+            "SPEEDER_DECODE_BUF": str(lv["db"]), "SPEEDER_SOCK_BUF": str(lv["sb"])}
+
+
+def _main_effective(env):
+    """What the main service actually runs with: the uplink settings fall back to the downlink ones when they are not written."""
+    g = lambda k, default="": env.get(k, default)
+    return {"SPEEDER_FEC": g("SPEEDER_FEC"), "SPEEDER_TIMEOUT": g("SPEEDER_TIMEOUT"), "SPEEDER_INTERVAL": g("SPEEDER_INTERVAL"),
+            "SPEEDER_FEC_UP": g("SPEEDER_FEC_UP", g("SPEEDER_FEC")), "SPEEDER_TIMEOUT_UP": g("SPEEDER_TIMEOUT_UP", g("SPEEDER_TIMEOUT")),
+            "SPEEDER_INTERVAL_UP": g("SPEEDER_INTERVAL_UP", g("SPEEDER_INTERVAL")),
+            "SPEEDER_DECODE_BUF": g("SPEEDER_DECODE_BUF"), "SPEEDER_SOCK_BUF": g("SPEEDER_SOCK_BUF"), "SPEEDER_MTU": g("SPEEDER_MTU")}
+
+
+def cmd_levels_init():
+    """Create (or complete) the level list and start one speederv2 per automatic level. Safe to run again."""
+    env_text, st = _read_env()
+    env = _parse_env(env_text)
+    with open(LOCKFILE, "a") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise Err("another operation is in progress")
+        d = _levels_load()
+        if d is None:
+            def n(k, default):
+                try:
+                    return int(env[k])
+                except (KeyError, ValueError):
+                    return default
+            fec = env.get("SPEEDER_FEC", "1:3,2:4,5:6,10:10,20:20,40:40")
+            custom = {"id": "custom", "name": "Custom", "loss": 0, "auto": False, "instance": False, "port": n("SPEEDER_PORT", 62932),
+                      "down": _level_side(fec, n("SPEEDER_TIMEOUT", 20), n("SPEEDER_INTERVAL", 5)),
+                      "up": _level_side(env.get("SPEEDER_FEC_UP", fec), n("SPEEDER_TIMEOUT_UP", n("SPEEDER_TIMEOUT", 20)),
+                                        n("SPEEDER_INTERVAL_UP", n("SPEEDER_INTERVAL", 5))),
+                      "db": n("SPEEDER_DECODE_BUF", 2000), "sb": n("SPEEDER_SOCK_BUF", 1024)}
+            d = {"version": 1, "default": "custom", "levels": [_preset_level(i, p) for i, p in enumerate(PRESETS)] + [custom]}
+        else:
+            have = set(l.get("id") for l in d["levels"])
+            for i, p in enumerate(PRESETS):
+                if p[0] not in have:
+                    d["levels"].append(_preset_level(i, p))
+        _write_file(LEVELS_FILE, json.dumps(d, indent=1) + "\n", 0, 0, 0o644)
+        for lv in d["levels"]:
+            if lv.get("instance"):
+                _write_file(LEVEL_ENV % lv["id"], _level_env_text(lv), 0, st.st_gid, 0o640)
+        run(["systemctl", "daemon-reload"], check=False)
+        units = [LEVEL_UNIT % lv["id"] for lv in d["levels"] if lv.get("instance")]
+        run(["systemctl", "enable", "--now"] + units, timeout=60, check=False)
+    return {"ok": True, "levels": [l["id"] for l in d["levels"]], "default": d["default"]}
+
+
+def cmd_levels_set(arg):
+    """Change level definitions, the default level and/or the packet size. Argument: base64 of a JSON request
+    {"default": id, "mtu": n, "levels": {id: {"down": {fec,timeout,interval}, "up": {...}, "db": n, "sb": n}}}."""
+    import base64
+    if not arg or len(arg) > 30000:
+        raise Err("invalid request")
+    try:
+        req = json.loads(base64.b64decode(arg, validate=True))
+    except Exception:
+        raise Err("invalid request")
+    if not isinstance(req, dict):
+        raise Err("invalid request")
+    d = _levels_load()
+    if d is None:
+        raise Err("FEC levels are not set up on this host")
+    env_text, st = _read_env()
+    by_id = dict((l["id"], l) for l in d["levels"])
+    changed, patches = [], req.get("levels") or {}
+    if not isinstance(patches, dict):
+        raise Err("invalid request")
+    for lid, patch in patches.items():
+        if lid not in by_id or not isinstance(patch, dict) or set(patch) - {"down", "up", "db", "sb"}:
+            raise Err("unknown level or setting")
+        cur = by_id[lid]
+        new = json.loads(json.dumps(cur))
+        for side in ("down", "up"):
+            if side in patch:
+                p = patch[side]
+                if not isinstance(p, dict) or set(p) - set(FEC_SIDE_KEYS):
+                    raise Err("invalid %s settings" % side)
+                merged = dict(cur[side], **p)
+                new[side] = _level_side(merged["fec"], merged["timeout"], merged["interval"])
+        if "db" in patch:
+            new["db"] = int(_int_in(300, 20000)(str(patch["db"])))
+        if "sb" in patch:
+            new["sb"] = int(_int_in(10, 10240)(str(patch["sb"])))
+        if new != cur:
+            by_id[lid] = new
+            changed.append(lid)
+    default = req.get("default", d["default"])
+    if default not in by_id:
+        raise Err("unknown default level")
+    mtu = None
+    if "mtu" in req and req["mtu"] is not None:
+        mtu = int(_int_in(576, 1500)(str(req["mtu"])))
+    env = _parse_env(env_text)
+    if mtu is not None and str(mtu) == env.get("SPEEDER_MTU"):
+        mtu = None
+    new_levels = [by_id[l["id"]] for l in d["levels"]]
+    main_new = _main_pairs(by_id[default])
+    if mtu is not None:
+        main_new["SPEEDER_MTU"] = str(mtu)
+    eff = _main_effective(env)
+    main_changed = any(eff.get(k) != v for k, v in main_new.items())
+    if not changed and default == d["default"] and not main_changed:
+        return {"ok": True, "changed": []}
 
     with open(LOCKFILE, "a") as lk:
         try:
             fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise Err("another operation is in progress")
-        sys.stderr.write("wg-admin: speeder-set %s\n" % ",".join(sorted(new)))
-        write_prev = open(SPEEDER_PREV, "w")
-        os.chmod(SPEEDER_PREV, st.st_mode & 0o777)
-        os.chown(SPEEDER_PREV, st.st_uid, st.st_gid)
-        write_prev.write(old_text)
-        write_prev.close()
-        before = _speeder_restarts()
-        write("\n".join(lines) + "\n")
-        run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
-        time.sleep(4)                       # longer than RestartSec: a crash loop shows up as a restart count
-        ok = run(["systemctl", "is-active", SPEEDER_UNIT], check=False).strip() == "active" and _speeder_restarts() == before
-        if not ok:
-            write(old_text)
-            run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
-            raise Err("the FEC service would not run with these settings; the previous settings were restored")
-        return {"ok": True, "applied": new, "service": unit_state(SPEEDER_UNIT)}
+        sys.stderr.write("wg-admin: levels-set changed=%s default=%s mtu=%s\n" % (",".join(changed) or "-", default, mtu))
+        old_levels_text = open(LEVELS_FILE).read()
+        old_env_files = {}
+        for lid in changed:
+            try:
+                old_env_files[lid] = open(LEVEL_ENV % lid).read()
+            except OSError:
+                old_env_files[lid] = None
+        restore_main = None
+
+        def rollback():
+            _write_file(LEVELS_FILE, old_levels_text, 0, 0, 0o644)
+            for lid, txt in old_env_files.items():
+                if txt is not None:
+                    _write_file(LEVEL_ENV % lid, txt, 0, st.st_gid, 0o640)
+            if restore_main is not None:
+                _write_file(SPEEDER_ENV, restore_main, st.st_uid, st.st_gid, st.st_mode & 0o777)
+                run(["systemctl", "restart", SPEEDER_UNIT], timeout=60, check=False)
+            for lid in set(changed) | (set(l["id"] for l in d["levels"] if l.get("instance")) if mtu is not None else set()):
+                if by_id[lid].get("instance"):
+                    run(["systemctl", "restart", LEVEL_UNIT % lid], timeout=60, check=False)
+
+        try:
+            d_new = dict(d, default=default, levels=new_levels)
+            _write_file(LEVELS_FILE, json.dumps(d_new, indent=1) + "\n", 0, 0, 0o644)
+            for lid in changed:
+                if by_id[lid].get("instance"):
+                    _write_file(LEVEL_ENV % lid, _level_env_text(by_id[lid]), 0, st.st_gid, 0o640)
+            if main_changed:
+                restore_main = _speeder_apply(main_new)
+            restart = [lid for lid in changed if by_id[lid].get("instance")]
+            if mtu is not None:
+                restart = [l["id"] for l in d["levels"] if l.get("instance")]
+            units = [LEVEL_UNIT % lid for lid in restart]
+            before = dict((u, _restarts(u)) for u in units)
+            for u in units:
+                run(["systemctl", "restart", u], timeout=60, check=False)
+            if units and not _all_active(units, before):
+                raise Err("a level would not run with these settings; everything was put back")
+        except Err:
+            rollback()
+            raise
+        except Exception:
+            rollback()
+            raise Err("could not apply the settings; everything was put back")
+    return {"ok": True, "changed": changed, "default": default}
+
 
 
 def cmd_logs(source, lines):
@@ -238,13 +443,8 @@ def cmd_logs(source, lines):
         text = run(["journalctl", "-u", UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
     elif source == "web-ui":
         text = run(["journalctl", "-u", WEB_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
-    elif source == "speeder":
-        text = run(["journalctl", "-u", SPEEDER_UNIT, "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
-    elif source == "faketcp":
-        args = ["journalctl", "-n", str(n), "--no-pager", "-o", "short-iso"]
-        for u in U2R_UNITS:
-            args += ["-u", u]
-        text = run(args, check=False)
+    elif source == "speeder":      # the main service and every level
+        text = run(["journalctl", "-u", SPEEDER_UNIT, "-u", "wg-speeder-level@*", "-n", str(n), "--no-pager", "-o", "short-iso"], check=False)
     else:
         raise Err("invalid log source")
     text = KEYARG_RE.sub(r"\1<hidden>", SECRET_RE.sub(r"\1 <hidden>", ANSI_RE.sub("", text)))
@@ -268,9 +468,14 @@ def main(argv):
                 raise Err("invalid line count")
             lines = int(a[2])
         return cmd_logs(a[1], lines)
-    if a and a[0] == "speeder-set":
-        return cmd_speeder_set(a[1:])
-    raise Err("usage: wg-admin status | config | service start|stop|restart | speeder-set K=V ... | logs SOURCE [N]")
+    if a and a[0] == "levels-init" and len(a) == 1:
+        return cmd_levels_init()
+    if a and a[0] == "levels-set" and len(a) == 2:
+        try:
+            return cmd_levels_set(a[1])
+        except Err as e:
+            raise Err("levels: " + str(e))          # safe to show in the web UI
+    raise Err("usage: wg-admin status | config | service start|stop|restart | levels-init | levels-set B64JSON | logs SOURCE [N]")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ a device (for example a home LAN carried by one peer). Configure it in the admin
 
 - Rules live in `/etc/wg-portfwd.json` and are rendered into an nftables table, `ip portfwd`, which is replaced
   atomically on every change and loaded at boot by `wg-portfwd.service`.
-- Public ports 1024-65535. Ports used by the admin tooling, WireGuard, the FEC and fake-TCP fronts, and any port
+- Public ports 1024-65535. Ports used by the admin tooling, WireGuard, the FEC fronts, and any port
   that is already listening are refused. At most 32 rules.
 - Targets: a WireGuard device (10.99.0.2-254), or an IPv4 address inside a private network (/16 to /31) that some peer
   carries in its AllowedIPs. The hub's own addresses, the VPN network and the server's local networks are refused.

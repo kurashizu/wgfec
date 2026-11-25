@@ -1,5 +1,8 @@
 package io.github.kurashizu.wgfec;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -9,12 +12,16 @@ final class Profile {
     String server = "", fec = "", address = "", mtu = "", dns = "", mode = "", timeout = "", interval = "";
     final List<String> speederArgs = new ArrayList<>();
     final List<String> notes = new ArrayList<>();
+    /** The server's FEC levels, weakest first (empty when the server has none or this is not an FEC profile). */
+    final List<FecTuner.Tier> tiers = new ArrayList<>();
+    static final String TIERS_PREFIX = "# wgfec-tiers:";
 
     static Profile parse(String text, String ownPackage) throws Exception {
         Profile p = new Profile();
         StringBuilder wg = new StringBuilder();
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
+            if (line.startsWith(TIERS_PREFIX)) { parseTiers(p, line.substring(TIERS_PREFIX.length())); continue; }
             List<String> t = line.isEmpty() || line.startsWith("[") || line.startsWith("#") || line.contains("=") && !line.contains(" -")
                     ? null : tokens(line);
             String prog = null;
@@ -24,10 +31,6 @@ final class Profile {
                 if (prog != null && prog.startsWith("speederv2")) {
                     if (!p.speederArgs.isEmpty()) throw new Exception("More than one speederv2 command was pasted.");
                     p.speederArgs.addAll(t.subList(i + 1, t.size()));
-                    continue;
-                }
-                if (prog != null && prog.startsWith("udp2raw")) {
-                    p.notes.add("Ignored a udp2raw line: fake-TCP needs root and is not supported in this app.");
                     continue;
                 }
             }
@@ -54,6 +57,36 @@ final class Profile {
 
     boolean hasFec() { return !speederArgs.isEmpty(); }
 
+    /** True when the app can switch this profile between several FEC levels. */
+    boolean hasTiers() { return hasFec() && tiers.size() > 1; }
+
+    /** The speederv2 arguments for a chosen uplink and downlink level (null choice: as pasted). */
+    List<String> speederArgsFor(Tuning.Choice c) {
+        if (c == null || !hasTiers() || c.up < 0 || c.up >= tiers.size() || c.down < 0 || c.down >= tiers.size()) return speederArgs;
+        return FecTuner.applyTiers(speederArgs, tiers.get(c.up), tiers.get(c.down));
+    }
+
+    private static void parseTiers(Profile p, String json) {
+        try {
+            JSONArray a = new JSONArray(json.trim());
+            List<FecTuner.Tier> out = new ArrayList<>();
+            for (int i = 0; i < a.length() && i < 12; i++) {
+                JSONObject o = a.getJSONObject(i);
+                String name = o.getString("n").replaceAll("[^\\w .-]", "");
+                String up = o.getString("u");
+                int loss = o.getInt("l"), port = o.getInt("p"), t = o.getInt("t"), iv = o.getInt("i"), d = o.getInt("d"), s = o.getInt("s");
+                if (name.isEmpty() || name.length() > 24 || !up.matches("[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*") || up.length() > 300
+                        || loss < 0 || loss > 100 || port < 1 || port > 65535 || t < 0 || t > 1000 || iv < 0 || iv > 1000
+                        || d < 300 || d > 20000 || s < 10 || s > 10240) throw new Exception("bad level " + (i + 1));
+                out.add(new FecTuner.Tier(name, loss, port, up, t, iv, d, s));
+            }
+            for (int i = 1; i < out.size(); i++) if (out.get(i).loss < out.get(i - 1).loss) throw new Exception("levels are not in order");
+            p.tiers.addAll(out);
+        } catch (Exception e) {
+            p.notes.add("Ignored the list of FEC levels in this profile (" + e.getMessage() + "); it still works with its fixed settings.");
+        }
+    }
+
     /** "FEC" or "Direct": how this profile reaches the server. */
     String modeLabel() { return hasFec() ? "FEC" : "Direct"; }
 
@@ -64,6 +97,7 @@ final class Profile {
     String describe() {
         return hasFec()
                 ? "Mode: FEC (WireGuard through speederv2)\nFEC setting: " + (fec.isEmpty() ? "default" : fec) + "\nServer: " + server
+                + (hasTiers() ? "\nFEC levels: " + tiers.size() + " (" + tiers.get(0).name + " to " + tiers.get(tiers.size() - 1).name + "), tuned from the Debug tab" : "")
                 : "Mode: Direct (plain WireGuard, no FEC)\nServer: " + server;
     }
 

@@ -4,8 +4,6 @@ WireGuard through UDPspeeder FEC, no root. The app embeds the official WireGuard
 a bundled `speederv2` as a child process listening on `127.0.0.1`; WireGuard's endpoint points at it. The app excludes
 itself from the VPN so the helper's packets go straight out.
 
-Fake-TCP (udp2raw) is not supported: it needs raw sockets, which means root.
-
 ## Build
 
 Requirements: JDK 17, Android SDK (platform 34, build-tools 34.0.0), NDK 26.3.11579264, Gradle 8.10+, git.

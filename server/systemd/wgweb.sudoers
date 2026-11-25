@@ -7,7 +7,7 @@ Cmnd_Alias WGWEB = /usr/local/sbin/wg-peer list, \
                    /usr/local/sbin/wg-admin status, \
                    /usr/local/sbin/wg-admin config, \
                    /usr/local/sbin/wg-admin service *, \
-                   /usr/local/sbin/wg-admin speeder-set *, \
+                   /usr/local/sbin/wg-admin levels-set *, \
                    /usr/local/sbin/wg-admin forward *, \
                    /usr/local/sbin/wg-admin logs *
 wgweb ALL=(root) NOPASSWD: WGWEB

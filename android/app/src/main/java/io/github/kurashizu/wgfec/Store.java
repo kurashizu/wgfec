@@ -71,6 +71,7 @@ final class Store {
         List<Item> l = list(c);
         l.removeIf(it -> it.id.equals(id));
         save(c, l);
+        Tuning.clear(c, id);
         if (sp(c).getString("active", "").equals(id)) setActive(c, l.isEmpty() ? "" : l.get(0).id);
     }
 

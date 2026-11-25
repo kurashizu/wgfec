@@ -208,8 +208,7 @@
     load(); autoRefresh(load, 5000);
   };
 
-  var VIA_LABEL = { direct: 'Direct (WireGuard)', speeder: 'Via UDPspeeder (FEC)', faketcp: 'Via faketcp (udp2raw)',
-                    'speeder-faketcp': 'FEC + faketcp (UDPspeeder + udp2raw)' };
+  var VIA_LABEL = { direct: 'Direct (WireGuard)', speeder: 'Via UDPspeeder (FEC)' };
 
   // ---------- devices ----------
   RENDER.devices = function () {
@@ -304,14 +303,13 @@
     load(); autoRefresh(load, 5000);
   };
 
-  // ---------- per-OS setup guide for the client programs (udp2raw and/or speederv2) ----------
-  // cmds = { u2r: 'udp2raw -c ...' | null, speeder: 'speederv2 -c ...' | null }, in the order they start.
+  // ---------- per-OS setup guide for the client program (speederv2 for FEC; nothing to run for a direct tunnel) ----------
+  // cmds = { speeder: 'speederv2 -c ...' | null }
   function setupGuide(cmds, conf, dev) {
     var ua = navigator.userAgent || '';
-    if (!cmds) cmds = { speeder: null, u2r: null };
-    if (typeof cmds === 'string') cmds = { speeder: cmds, u2r: null };
-    var direct = !cmds.speeder && !cmds.u2r;       // plain WireGuard: nothing to run besides the tunnel itself
-    var uArgs = cmds.u2r ? cmds.u2r.replace(/^udp2raw\s+/, '') : null;
+    if (!cmds) cmds = { speeder: null };
+    if (typeof cmds === 'string') cmds = { speeder: cmds };
+    var direct = !cmds.speeder;                    // plain WireGuard: nothing to run besides the tunnel itself
     var sArgs = cmds.speeder ? cmds.speeder.replace(/^speederv2\s+/, '') : null;
     // PowerShell breaks "-l127.0.0.1:51821" at the dot and "-f1:3,2:4" at the commas, so for Windows
     // every value gets its own word and double quotes (cmd.exe accepts that form too).
@@ -319,54 +317,33 @@
       return args.replace(/(^|\s)-([lrf])(\S+)/g, function (m, sp, f, v) { return sp + '-' + f + ' "' + v + '"'; })
                  .replace(/(^|\s)-k (\S+)/, function (m, sp, v) { return sp + '-k "' + v + '"'; });
     }
-    // udp2raw_mp (Windows/macOS) has no -a; "easy-faketcp" talks to a faketcp server without firewall rules.
-    function mpArgs(args) { return args.replace(/\s-a --keep-rule/, '').replace('--raw-mode faketcp', '--raw-mode easy-faketcp'); }
-    var what = [cmds.u2r ? 'udp2raw' : null, cmds.speeder ? 'speederv2' : null].filter(Boolean).join(', then ');
-    var both = !!(cmds.u2r && cmds.speeder);
-    var order2 = both ? 'each in its own window, in this order, and keep them open' : 'it and keep it open';
-    // Windows
-    var wdl = [];
-    if (cmds.u2r) wdl.push('udp2raw_mp_binaries.tar.gz (github.com/wangyu-/udp2raw-multiplatform/releases; untested here, try udp2raw_mp_wepoll.exe if it will not start)');
-    if (cmds.speeder) wdl.push('speederv2_windows.zip (github.com/wangyu-/UDPspeeder/releases)');
-    var win = [['text', 'Install WireGuard for Windows (wireguard.com/install)' + (cmds.u2r ? ' and Npcap (npcap.com).' : '.')]];
-    if (wdl.length) win.push(['text', 'Download and unpack: ' + wdl.join(' and ') + '.']);
-    win.push(['text', 'In PowerShell, run ' + order2 + ' (keep the quotes):']);
-    if (cmds.u2r) win.push(['code', '.\\udp2raw_mp.exe ' + winQuote(mpArgs(uArgs))]);
-    if (cmds.speeder) win.push(['code', '.\\speederv2.exe ' + winQuote(sArgs)]);
-    win.push(['text', 'In WireGuard: Import tunnel(s) from file, pick ' + conf + ', Activate.']);
-    // Linux: run the unpacked binaries directly, nothing is installed
-    var ldl = [];
-    if (cmds.u2r) ldl.push('udp2raw_binaries.tar.gz (github.com/wangyu-/udp2raw/releases)');
-    if (cmds.speeder) ldl.push('speederv2_binaries.tar.gz (github.com/wangyu-/UDPspeeder/releases)');
-    var lin = [['text', 'Install WireGuard:'], ['code', 'sudo apt install wireguard-tools resolvconf'],
-               ['text', 'Download and unpack ' + ldl.join(' and ') + ' into one folder, then in that folder run ' + order2 + ':']];
-    if (cmds.u2r) lin.push(['code', 'sudo ./udp2raw_amd64 ' + uArgs]);
-    if (cmds.speeder) lin.push(['code', './speederv2_amd64 ' + sArgs]);
-    lin.push(['text', 'Start the tunnel (wg-quick down to stop):']);
-    lin.push(['code', 'sudo wg-quick up ./' + conf]);
-    // macOS
-    var mac = [['text', 'Not tested here. Install WireGuard from the App Store' + (cmds.u2r ? ' and libpcap (brew install libpcap).' : '.')]];
-    if (cmds.u2r) mac.push(['text', 'Download udp2raw_mp_binaries.tar.gz (github.com/wangyu-/udp2raw-multiplatform/releases; the _m1 file on Apple silicon), then chmod +x it.']);
-    if (cmds.speeder) { mac.push(['text', 'Build speederv2:']); mac.push(['code', 'git clone https://github.com/wangyu-/UDPspeeder && cd UDPspeeder && make mac']); }
-    mac.push(['text', 'In Terminal, run ' + order2 + ':']);
-    if (cmds.u2r) mac.push(['code', 'sudo ./udp2raw_mp_mac ' + mpArgs(uArgs)]);
-    if (cmds.speeder) mac.push(['code', './speederv2_mac ' + sArgs]);
-    mac.push(['text', 'In WireGuard: Import tunnel(s) from file, pick ' + conf + ', Activate.']);
+    var win, lin, mac;
     if (direct) {
       win = [['text', 'Install WireGuard for Windows (wireguard.com/install), choose "Import tunnel(s) from file", pick ' + conf + ', then Activate.']];
       lin = [['text', 'Install WireGuard (the wireguard-tools package of your distribution), then start the tunnel (wg-quick down to stop):'],
              ['code', 'sudo wg-quick up ./' + conf]];
       mac = [['text', 'Install WireGuard from the App Store, choose "Import tunnel(s) from file", pick ' + conf + ', then Activate.']];
+    } else {
+      win = [['text', 'Install WireGuard for Windows (wireguard.com/install).'],
+             ['text', 'Download and unpack speederv2_windows.zip (github.com/wangyu-/UDPspeeder/releases).'],
+             ['text', 'In PowerShell, run it and keep it open (keep the quotes):'],
+             ['code', '.\\speederv2.exe ' + winQuote(sArgs)],
+             ['text', 'In WireGuard: Import tunnel(s) from file, pick ' + conf + ', Activate.']];
+      // Linux: run the unpacked binary directly, nothing is installed
+      lin = [['text', 'Install WireGuard:'], ['code', 'sudo apt install wireguard-tools resolvconf'],
+             ['text', 'Download and unpack speederv2_binaries.tar.gz (github.com/wangyu-/UDPspeeder/releases), then in that folder run it and keep it open:'],
+             ['code', './speederv2_amd64 ' + sArgs],
+             ['text', 'Start the tunnel (wg-quick down to stop):'], ['code', 'sudo wg-quick up ./' + conf]];
+      mac = [['text', 'Not tested here. Install WireGuard from the App Store.'],
+             ['text', 'Build speederv2:'], ['code', 'git clone https://github.com/wangyu-/UDPspeeder && cd UDPspeeder && make mac'],
+             ['text', 'In Terminal, run it and keep it open:'], ['code', './speederv2_mac ' + sArgs],
+             ['text', 'In WireGuard: Import tunnel(s) from file, pick ' + conf + ', Activate.']];
     }
     // Android: the WG FEC app takes one pasted "app string" that holds the WireGuard config and the speederv2 command
-    var droid, appStep = null;
-    if (cmds.u2r) droid = [['text', 'Not available: fake-TCP (udp2raw) needs root on Android, and the app does not support it. Switch this device to Direct or FEC above.']];
-    else {
-      appStep = ['code', 'Preparing…', 'wrap'];
-      droid = [['text', 'Install the WG FEC app on the phone.'],
-               ['text', 'Copy this app string (it contains the private key, so keep it private), then in the app tap Paste and confirm the import:'], appStep,
-               ['text', cmds.speeder ? 'Tap Connect and allow the VPN request. The app starts speederv2 itself, so there is nothing else to run.' : 'Tap Connect and allow the VPN request. This is a plain WireGuard tunnel without FEC. The official WireGuard app also works: scan the QR code above.']];
-    }
+    var appStep = ['code', 'Preparing…', 'wrap'];
+    var droid = [['text', 'Install the WG FEC app on the phone.'],
+                 ['text', 'Copy this app string (it contains the private key, so keep it private), then in the app tap Paste and confirm the import:'], appStep,
+                 ['text', cmds.speeder ? 'Tap Connect and allow the VPN request. The app starts speederv2 itself, so there is nothing else to run.' : 'Tap Connect and allow the VPN request. This is a plain WireGuard tunnel without FEC. The official WireGuard app also works: scan the QR code above.']];
     var guides = { windows: { label: 'Windows', steps: win }, linux: { label: 'Linux', steps: lin }, macos: { label: 'macOS', steps: mac }, android: { label: 'Android', steps: droid } };
     var order = ['windows', 'linux', 'macos', 'android'];
     var cur = /Android/i.test(ua) ? 'android' : (/Windows/i.test(ua) ? 'windows' : (/Mac/i.test(ua) ? 'macos' : 'linux'));
@@ -374,7 +351,7 @@
     var tabs = el('div', { class: 'guide-tabs' });
     var body = el('div');
     wrap.appendChild(el('div', { class: 'section-title', text: 'Set up this device' }));
-    wrap.appendChild(el('div', { class: 'muted', text: (direct ? 'Pick your system.' : cmds.u2r && cmds.speeder ? 'Start udp2raw, then speederv2, then the tunnel.' : 'Start ' + what + ' first, then the tunnel.') + ' On Android use the Android tab; iPhones cannot run these programs.' }));
+    wrap.appendChild(el('div', { class: 'muted', text: (direct ? 'Pick your system.' : 'Start speederv2 first, then the tunnel.') + ' On Android use the Android tab; iPhones cannot run these programs.' }));
     wrap.appendChild(tabs); wrap.appendChild(body);
     function paint() {
       clear(tabs); clear(body);
@@ -418,7 +395,8 @@
 
   // ---------- app string for the Android app "WG FEC" ----------
   // Link format: wgfec://1/<base64url(JSON)>  or  wgfec://1z/<base64url(zlib(JSON))> (used when the browser can compress).
-  // JSON: {"v":1,"name":"...","wg":"<WireGuard config>","sp":"<speederv2 client command>"}; "sp" is absent for a direct tunnel.
+  // JSON: {"v":1,"name":"...","wg":"<WireGuard config>","sp":"<speederv2 client command>","tiers":[...]}; "sp" is absent for a direct tunnel.
+  // "tiers" (optional): the FEC levels of the server, weakest first: {n: name, l: loss it is for (%), p: server UDP port, u/t/i: uplink FEC table, wait, interleave, d/s: decode / socket buffer}.
   function b64url(bytes) {
     var s = '';
     for (var i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -429,6 +407,7 @@
     var c = d.cmds || {};
     var sp = c.speeder || d.speeder_cmd;
     if (typeof sp === 'string' && sp) o.sp = sp;
+    if (sp && Array.isArray(d.tiers) && d.tiers.length) o.tiers = d.tiers;       // FEC levels the app can switch between
     var raw = new TextEncoder().encode(JSON.stringify(o));
     var plain = 'wgfec://1/' + b64url(raw);
     if (typeof CompressionStream === 'undefined') return Promise.resolve(plain);
@@ -478,7 +457,7 @@
 
   // ---------- logs (a panel on the Service page) ----------
   function buildLogs() {
-    var src = el('select', { 'aria-label': 'Log source' }, [['wg-service', 'WireGuard service (systemd)'], ['boringtun', 'BoringTun'], ['speeder', 'UDPspeeder (FEC)'], ['faketcp', 'udp2raw (faketcp)'], ['web-ui', 'This web UI']].map(function (o) { return el('option', { value: o[0], text: o[1] }); }));
+    var src = el('select', { 'aria-label': 'Log source' }, [['wg-service', 'WireGuard service (systemd)'], ['boringtun', 'BoringTun'], ['speeder', 'UDPspeeder (FEC)'], ['web-ui', 'This web UI']].map(function (o) { return el('option', { value: o[0], text: o[1] }); }));
     var lines = el('select', { 'aria-label': 'Line count' }, ['100', '200', '500'].map(function (n) { return el('option', { value: n, text: n + ' lines' }); }));
     var auto = el('input', { type: 'checkbox', id: 'auto' });
     var pre = el('pre', { class: 'logs', text: 'Loading…' });
@@ -502,7 +481,8 @@
     return { panel: panel, load: load, auto: auto };
   }
 
-  // ---------- FEC settings editor (presets from aggressive to conservative) ----------
+  // ---------- FEC levels editor ----------
+  // FEC_PRESETS: the defaults and notes of the five levels (the same values as PRESETS in wg-admin).
   var FEC_PRESETS = [
     { id: 'aggressive', name: 'Aggressive', loss: '3%',
       down: '1:1,2:1,5:1,10:1,20:2,40:3', td: 10, id_: 0, up: '1:1,2:1,4:1,8:1,16:1,32:1', tu: 10, iu: 0, db: 2000, sb: 1024,
@@ -558,82 +538,125 @@
   }
 
   var pendingFlash = null;
+  // FEC levels: each level is a set of FEC parameters meant for a certain amount of link loss, served on its own UDP port.
+  // The default level is served on the original port and is what the client commands of the other platforms use.
   function buildFecEditor(d) {
-    var inp = {}, msg = el('div'), noteEl = el('div', { class: 'muted preset-note' });
-    function field(key, label, val, help) {
-      var i = el('input', { type: 'text', autocomplete: 'off', 'aria-label': label });
-      i.value = String(val); inp[key] = i; i.addEventListener('input', paint);
-      return el('label', { class: 'fld' }, [el('span', { text: label }), i, help ? el('small', { class: 'muted', text: help }) : null]);
-    }
-    var cur = {
-      down: d.fec, td: d.timeout, id_: d.interval, up: d.fec_up || d.fec, tu: d.timeout_up != null ? d.timeout_up : d.timeout,
-      iu: d.interval_up != null ? d.interval_up : d.interval, mtu: d.fec_mtu || 1250, db: d.decode_buf || 2000, sb: d.sock_buf || 1024 };
-    var prevDown = el('div'), prevUp = el('div'), presetRow = el('div', { class: 'preset-row' }), presetBtns = {};
-    FEC_PRESETS.forEach(function (ps) {
-      var b = el('button', { class: 'btn slim', type: 'button', text: ps.name + ' (' + ps.loss + ')', onclick: function () { apply(ps); } });
-      presetBtns[ps.id] = b; presetRow.appendChild(b);
+    if (!d.levels) return el('div', { class: 'msg warn', text: 'FEC levels are not set up on this server yet. Run server/scripts/install-levels.sh on it, then reload this page.' });
+    var draft = {}, saved = {}, byId = {}, current = d.default_level, defaultId = d.default_level, mtu = String(d.fec_mtu || 1250);
+    var loss = { d: 0, u: 0 }, inp = {}, msg = el('div');
+    d.levels.forEach(function (l) {
+      byId[l.id] = l;
+      draft[l.id] = { down: l.down.fec, td: String(l.down.timeout), id_: String(l.down.interval), up: l.up.fec, tu: String(l.up.timeout), iu: String(l.up.interval), db: String(l.db), sb: String(l.sb) };
+      saved[l.id] = JSON.stringify(draft[l.id]);
     });
     var title = function (t) { return el('div', { class: 'section-title', text: t }); };
-    var form = el('div', {}, [
-      title('Presets, from aggressive to conservative'), presetRow, noteEl,
-      title('Downlink: server to device'),
-      el('div', { class: 'muted', text: 'Applied by this server as soon as you save.' }),
-      field('down', 'FEC table (data:parity, comma separated)', cur.down,
-        'Each entry means: for every group of data packets, send parity extra packets; any data of the data+parity packets rebuild the whole group. The busier the link, the later (larger) entry is used; between entries parity is interpolated.'),
-      el('div', { class: 'fld-row' }, [
-        field('td', 'Max wait per group (ms)', cur.td, 'A group is sent after this long even if not full. Longer: bigger groups, less overhead, more delay.'),
-        field('id_', 'Interleave window (ms)', cur.id_, 'Packets of one group are spread over this time so a short loss burst cannot hit the whole group. 0: back to back.'),
-        field('lossd', 'Assumed link loss (%)', 45, 'Preview only.')]),
-      prevDown,
-      title('Uplink: device to server'),
-      el('div', { class: 'muted', text: 'Stored here and used by the client command. It applies to client configs opened after you save; a device that is already running keeps its old command until you copy the new one.' }),
-      field('up', 'FEC table (data:parity, comma separated)', cur.up),
-      el('div', { class: 'fld-row' }, [field('tu', 'Max wait per group (ms)', cur.tu), field('iu', 'Interleave window (ms)', cur.iu), field('lossu', 'Assumed link loss (%)', 5)]),
-      prevUp,
-      title('Both directions'),
-      el('div', { class: 'fld-row' }, [
-        field('mtu', 'Max packet size (bytes)', cur.mtu, 'Upper limit for each FEC packet on the wire; larger data is split.'),
-        field('db', 'Decode buffer (packets)', cur.db, 'Packets the decoder keeps while waiting for the rest of a group (about 4 KB each, per connection). Large groups at high rates need more.'),
-        field('sb', 'Socket buffer (KB)', cur.sb, 'Kernel buffer of the FEC socket; the system limit net.core.rmem_max caps it.')]),
-      el('div', { class: 'muted hint', text: 'Saving restarts the FEC service; devices using it reconnect within a few seconds. If the service cannot start with the new values, the previous ones are restored.' })
-    ]);
+    var label = function (l) { return l.name + (l.loss ? ' (up to about ' + l.loss + '%)' : ''); };
+    var presetOf = function (id) { var r = null; FEC_PRESETS.forEach(function (ps) { if (ps.id === id) r = ps; }); return r; };
+
+    var defSel = el('select', { 'aria-label': 'Default level' }, d.levels.map(function (l) { return el('option', { value: l.id, text: label(l) }); }));
+    defSel.value = defaultId;
+    defSel.addEventListener('change', function () { defaultId = defSel.value; paintTabs(); });
+    var mtuInp = el('input', { type: 'text', autocomplete: 'off', 'aria-label': 'Max packet size' });
+    mtuInp.value = mtu;
+    mtuInp.addEventListener('input', function () { mtu = mtuInp.value.trim(); });
+
+    var tabs = el('div', { class: 'preset-row' }), noteEl = el('div', { class: 'muted preset-note' }), form = el('div'), prevDown = el('div'), prevUp = el('div');
+    function dirty(id) { return JSON.stringify(draft[id]) !== saved[id]; }
+    function paintTabs() {
+      clear(tabs);
+      d.levels.forEach(function (l) {
+        var bits = (l.id === defaultId ? ' · default' : '') + (dirty(l.id) ? ' •' : '');
+        tabs.appendChild(el('button', { class: 'btn slim' + (l.id === current ? ' on' : ''), type: 'button', text: l.name + bits, onclick: function () { current = l.id; paintLevel(); } }));
+      });
+    }
     function v(k) { return inp[k].value.trim(); }
-    function paint() {
+    function paintPrev() {
       clear(prevDown); clear(prevUp);
       prevDown.appendChild(fecPreview(v('down'), parseFloat(v('lossd')) || 0, true));
       prevUp.appendChild(fecPreview(v('up'), parseFloat(v('lossu')) || 0, false));
-      var hit = null;
-      FEC_PRESETS.forEach(function (ps) {
-        var same = v('down') === ps.down && v('up') === ps.up && v('td') === String(ps.td) && v('id_') === String(ps.id_) &&
-                   v('tu') === String(ps.tu) && v('iu') === String(ps.iu) && v('db') === String(ps.db) && v('sb') === String(ps.sb);
-        presetBtns[ps.id].className = 'btn slim' + (same ? ' on' : '');
-        if (same) hit = ps;
-      });
-      noteEl.textContent = hit ? hit.note : 'Custom settings.';
     }
-    function apply(ps) {
-      inp.down.value = ps.down; inp.td.value = ps.td; inp.id_.value = ps.id_; inp.up.value = ps.up; inp.tu.value = ps.tu; inp.iu.value = ps.iu;
-      inp.db.value = ps.db; inp.sb.value = ps.sb;
-      inp.lossd.value = parseInt(ps.loss, 10); inp.lossu.value = Math.max(1, Math.round(parseInt(ps.loss, 10) / 5));
-      paint();
+    function field(key, name, help, readonly) {
+      var i = el('input', { type: 'text', autocomplete: 'off', 'aria-label': name });
+      i.value = draft[current][key];
+      inp[key] = i;
+      i.addEventListener('input', function () { draft[current][key] = i.value.trim(); paintTabs(); paintPrev(); });
+      return el('label', { class: 'fld' }, [el('span', { text: name }), i, help ? el('small', { class: 'muted', text: help }) : null]);
     }
-    var save = el('button', { class: 'btn primary', type: 'button', text: 'Save and restart the FEC service' });
-    var wrap = el('div', {}, [form, msg, el('div', { class: 'row end' }, [el('button', { class: 'btn', type: 'button', text: 'Discard changes', onclick: function () { selectTab('settings'); } }), save])]);
-    paint();
+    function previewField(key, name, val) {
+      var i = el('input', { type: 'text', autocomplete: 'off', 'aria-label': name });
+      i.value = String(val); inp[key] = i; i.addEventListener('input', paintPrev);
+      return el('label', { class: 'fld' }, [el('span', { text: name }), i, el('small', { class: 'muted', text: 'Preview only, not saved.' })]);
+    }
+    function paintLevel() {
+      var l = byId[current], ps = presetOf(current);
+      clear(form); inp = {};
+      noteEl.textContent = (ps ? ps.note + ' ' : 'The settings this server used before levels existed. It is not offered to the Android app for automatic switching. ') +
+        (l.instance ? 'Runs on UDP port ' + l.port + ' (' + (l.state === 'active' ? 'running' : l.state) + ').' : 'Served on the original port ' + l.port + ' while it is the default level.');
+      form.appendChild(title('Downlink: server to device'));
+      form.appendChild(el('div', { class: 'muted', text: 'Used by this level\'s service as soon as you save.' }));
+      form.appendChild(field('down', 'FEC table (data:parity, comma separated)',
+        'Each entry means: for every group of data packets, send parity extra packets; any data of the data+parity packets rebuild the whole group. The busier the link, the later (larger) entry is used; between entries parity is interpolated.'));
+      form.appendChild(el('div', { class: 'fld-row' }, [
+        field('td', 'Max wait per group (ms)', 'A group is sent after this long even if not full. Longer: bigger groups, less overhead, more delay.'),
+        field('id_', 'Interleave window (ms)', 'Packets of one group are spread over this time so a short loss burst cannot hit the whole group. 0: back to back.'),
+        previewField('lossd', 'Assumed link loss (%)', l.loss || 25)]));
+      form.appendChild(prevDown);
+      form.appendChild(title('Uplink: device to server'));
+      form.appendChild(el('div', { class: 'muted', text: 'Given to devices in their client command and in the Android app string. A device that is already running keeps its old uplink settings until it gets a new command or string.' }));
+      form.appendChild(field('up', 'FEC table (data:parity, comma separated)'));
+      form.appendChild(el('div', { class: 'fld-row' }, [field('tu', 'Max wait per group (ms)'), field('iu', 'Interleave window (ms)'), previewField('lossu', 'Assumed link loss (%)', Math.max(1, Math.round((l.loss || 25) / 5)))]));
+      form.appendChild(prevUp);
+      form.appendChild(title('Memory for this level'));
+      form.appendChild(el('div', { class: 'fld-row' }, [
+        field('db', 'Decode buffer (packets)', 'Packets the decoder keeps while waiting for the rest of a group (about 4 KB each, per connection). Large groups at high rates need more.'),
+        field('sb', 'Socket buffer (KB)', 'Kernel buffer of the FEC socket; the system limit net.core.rmem_max caps it.')]));
+      if (ps) form.appendChild(el('div', { class: 'row end' }, [el('button', { class: 'btn slim', type: 'button', text: 'Reset this level to its defaults', onclick: function () {
+        draft[current] = { down: ps.down, td: String(ps.td), id_: String(ps.id_), up: ps.up, tu: String(ps.tu), iu: String(ps.iu), db: String(ps.db), sb: String(ps.sb) };
+        paintLevel();
+      } })]));
+      paintTabs(); paintPrev();
+    }
+
+    var save = el('button', { class: 'btn primary', type: 'button', text: 'Save' });
+    var wrap = el('div', {}, [
+      el('div', { class: 'muted', text: 'The tunnel has several levels. A level is a set of FEC settings meant for a certain amount of link loss, and each runs on its own UDP port. ' +
+        'The Android app measures the link and switches between the levels by itself; nothing has to be changed on the server for that.' }),
+      title('Default level'),
+      el('label', { class: 'fld' }, [el('span', { text: 'Level' }), defSel,
+        el('small', { class: 'muted', text: 'What a device starts with, and what the commands for Linux, Windows, macOS and iOS use. It is served on the original UDP port ' + d.port + '.' })]),
+      title('Levels'), tabs, noteEl, form,
+      title('All levels'),
+      el('label', { class: 'fld' }, [el('span', { text: 'Max packet size (bytes)' }), mtuInp,
+        el('small', { class: 'muted', text: 'Upper limit for each FEC packet on the wire; larger data is split. Changing it restarts every level.' })]),
+      el('div', { class: 'muted hint', text: 'Saving restarts only the levels you changed. Changing the default level restarts the main service, and a new packet size restarts all of them; ' +
+        'devices on a restarted level reconnect within a few seconds. If a service cannot start with the new values, everything is put back.' }),
+      msg,
+      el('div', { class: 'row end' }, [el('button', { class: 'btn', type: 'button', text: 'Discard changes', onclick: function () { selectTab('settings'); } }), save])
+    ]);
+    paintLevel();
+
     save.addEventListener('click', function () {
       clear(msg);
-      var nums = { td: 'timeout', id_: 'interval', tu: 'timeout_up', iu: 'interval_up', mtu: 'mtu', db: 'decode_buf', sb: 'sock_buf' };
-      var body = { fec: v('down'), fec_up: v('up') };
-      if (!parseFec(body.fec) || !parseFec(body.fec_up)) { msg.appendChild(el('div', { class: 'msg bad', text: 'Fix the FEC tables first (see the preview).' })); return; }
-      for (var k in nums) {
-        if (!/^[0-9]{1,6}$/.test(v(k))) { msg.appendChild(el('div', { class: 'msg bad', text: 'Numbers only in the time, size and buffer fields.' })); return; }
-        body[nums[k]] = parseInt(v(k), 10);
-      }
-      save.disabled = true; save.textContent = 'Restarting…';
-      api('POST', '/api/speeder/settings', body).then(function (r) {
-        save.disabled = false; save.textContent = 'Save and restart the FEC service';
+      var body = { levels: {} }, bad = null;
+      d.levels.forEach(function (l) {
+        if (!dirty(l.id)) return;
+        var f = draft[l.id];
+        if (!parseFec(f.down) || !parseFec(f.up)) { bad = l.name + ': fix the FEC tables first (see the preview).'; return; }
+        var n = {};
+        ['td', 'id_', 'tu', 'iu', 'db', 'sb'].forEach(function (k) { if (!/^[0-9]{1,6}$/.test(f[k])) bad = l.name + ': numbers only in the time, size and buffer fields.'; else n[k] = parseInt(f[k], 10); });
+        body.levels[l.id] = { down: { fec: f.down, timeout: n.td, interval: n.id_ }, up: { fec: f.up, timeout: n.tu, interval: n.iu }, db: n.db, sb: n.sb };
+      });
+      if (!bad && !/^[0-9]{3,4}$/.test(mtu)) bad = 'Max packet size: a number of bytes.';
+      if (bad) { msg.appendChild(el('div', { class: 'msg bad', text: bad })); return; }
+      if (defaultId !== d.default_level) body.default = defaultId;
+      if (mtu !== String(d.fec_mtu || 1250)) body.mtu = parseInt(mtu, 10);
+      if (!Object.keys(body.levels).length) delete body.levels;
+      if (!Object.keys(body).length) { msg.appendChild(el('div', { class: 'msg warn', text: 'Nothing changed.' })); return; }
+      save.disabled = true; save.textContent = 'Applying…';
+      api('POST', '/api/speeder/levels', body).then(function (r) {
+        save.disabled = false; save.textContent = 'Save';
         if (!r.ok) { msg.appendChild(el('div', { class: 'msg bad', text: (r.data && r.data.error) || 'Could not save' })); return; }
-        pendingFlash = 'Saved. The FEC service restarted with the new settings.';
+        pendingFlash = 'Saved. The changed FEC services restarted with the new settings.';
         selectTab('settings');
       });
     });
@@ -791,20 +814,19 @@
       spd.appendChild(el('div', { class: 'muted', text: d.required ? 'Every device uses this tunnel; the WireGuard port is closed from outside.' : 'Optional: pick it per device when adding one.' }));
       var kvx = function (k, v) { return el('div', { class: 'kv' }, [el('div', { class: 'k', text: k }), el('div', { class: 'v', text: v })]); };
       spd.appendChild(el('div', { class: 'kv' }, [el('div', { class: 'k', text: 'State' }), el('div', { class: 'v' }, [badge(d.active === 'active' ? 'ok' : 'bad', d.active === 'active' ? 'Running' : d.active)])]));
-      spd.appendChild(kvx('UDP port', String(d.port)));
-      spd.appendChild(kvx('Downlink (server to device)', d.fec + ' (data:parity) · max wait ' + d.timeout + ' ms · interleave ' + d.interval + ' ms'));
-      spd.appendChild(kvx('Uplink (device to server)', (d.fec_up || d.fec) + ' · max wait ' + (d.timeout_up != null ? d.timeout_up : d.timeout) + ' ms · interleave ' + (d.interval_up != null ? d.interval_up : d.interval) + ' ms'));
-      if (d.fec_mtu) spd.appendChild(kvx('Packet size / buffers', 'max ' + d.fec_mtu + ' B · decode buffer ' + d.decode_buf + ' packets · socket buffer ' + d.sock_buf + ' KB'));
-      var u = d.u2r;
-      if (u) {
-        spd.appendChild(el('h2', { text: 'faketcp (udp2raw)' }));
-        spd.appendChild(el('div', { class: 'muted', text: 'UDP disguised as TCP, alone or in front of the FEC tunnel.' }));
-        spd.appendChild(el('div', { class: 'kv' }, [el('div', { class: 'k', text: 'faketcp only' }),
-          el('div', { class: 'v' }, [badge(u.active === 'active' ? 'ok' : 'bad', u.active === 'active' ? 'Running' : u.active), document.createTextNode('  TCP ' + u.port)])]));
-        spd.appendChild(el('div', { class: 'kv' }, [el('div', { class: 'k', text: 'FEC + faketcp' }),
-          el('div', { class: 'v' }, [badge(u.active_fec === 'active' ? 'ok' : 'bad', u.active_fec === 'active' ? 'Running' : u.active_fec), document.createTextNode('  TCP ' + u.port_fec)])]));
-        spd.appendChild(kvx('Encryption / integrity', u.cipher + ' / ' + u.auth));
+      spd.appendChild(kvx('Original UDP port', String(d.port)));
+      if (d.levels) {
+        spd.appendChild(kvx('Default level', (function () { var n = d.default_level; d.levels.forEach(function (l) { if (l.id === d.default_level) n = l.name; }); return n + ' (original port)'; })()));
+        d.levels.forEach(function (l) {
+          spd.appendChild(el('div', { class: 'kv' }, [el('div', { class: 'k', text: l.name + (l.loss ? ' · up to about ' + l.loss + '%' : '') }),
+            el('div', { class: 'v' }, [l.instance ? badge(l.state === 'active' ? 'ok' : 'bad', l.state === 'active' ? 'Running' : l.state) : document.createTextNode('default only'),
+              document.createTextNode('  ' + (l.instance ? 'UDP ' + l.port + ' · ' : '') + 'downlink ' + l.down.fec + ' · wait ' + l.down.timeout + ' ms')])]));
+        });
+      } else {
+        spd.appendChild(kvx('Downlink (server to device)', d.fec + ' (data:parity) · max wait ' + d.timeout + ' ms · interleave ' + d.interval + ' ms'));
+        spd.appendChild(kvx('Uplink (device to server)', (d.fec_up || d.fec) + ' · max wait ' + (d.timeout_up != null ? d.timeout_up : d.timeout) + ' ms · interleave ' + (d.interval_up != null ? d.interval_up : d.interval) + ' ms'));
       }
+      if (d.fec_mtu) spd.appendChild(kvx('Max packet size', d.fec_mtu + ' B'));
     });
     api('GET', '/api/config').then(function (r) {
       cfgPre.textContent = r.ok ? r.data.config : (r.data.error || 'Cannot load config');

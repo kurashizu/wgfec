@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit;
 public class TunnelService extends Service {
     enum St { STOPPED, CONNECTING, CONNECTED, ERROR }
 
-    static final String ACTION_START = "start", ACTION_STOP = "stop";
+    static final String ACTION_START = "start", ACTION_STOP = "stop", ACTION_RETUNE = "retune";
     static volatile St state = St.STOPPED;
     static volatile String error = "";
     static volatile String profileName = "";
@@ -48,6 +48,8 @@ public class TunnelService extends Service {
 
     private volatile boolean stopping;
     private volatile Process proc;
+    private volatile List<String> speederCmd;      // what the helper loop starts next
+    private volatile boolean retuning;
     private Thread worker, monitor;
 
     private final Tunnel tunnel = new Tunnel() {
@@ -56,6 +58,11 @@ public class TunnelService extends Service {
     };
 
     static boolean running() { return state == St.CONNECTING || state == St.CONNECTED; }
+
+    /** Tell a running tunnel to pick up the FEC level chosen for its profile (restarts only the speederv2 helper). */
+    static void retune(android.content.Context c) {
+        if (running()) c.startService(new Intent(c, TunnelService.class).setAction(ACTION_RETUNE));
+    }
 
     static void log(String s) {
         synchronized (LOG) {
@@ -89,16 +96,53 @@ public class TunnelService extends Service {
             if (it == null) { state = St.ERROR; error = "No profile selected."; poke(); stopSelf(); return START_NOT_STICKY; }
             profileName = it.name;
             Profile pm = it.parsed();
-            profileMode = pm == null ? "" : pm.modeLabel();
+            profileMode = modeText(it, pm);
             goForeground();
             stopping = false;
             setState(St.CONNECTING, null);
             worker = new Thread(() -> startAll(it), "wgfec-start");
             worker.start();
+        } else if (ACTION_RETUNE.equals(action)) {
+            if (running()) new Thread(this::retuneNow, "wgfec-retune").start();
         } else {
             new Thread(() -> stopAll(null), "wgfec-stop").start();
         }
         return START_NOT_STICKY;
+    }
+
+    private String modeText(Store.Item it, Profile pm) {
+        if (pm == null) return "";
+        String t = Tuning.label(pm, Tuning.get(this, it.id));
+        return t == null ? pm.modeLabel() : pm.modeLabel() + " · " + t;
+    }
+
+    /** Switch the speederv2 helper to the level now chosen for the active profile. The tunnel itself stays up. */
+    private void retuneNow() {
+        try {
+            Store.Item it = Store.active(this);
+            if (it == null || !running()) return;
+            Profile p = Profile.parse(it.text, getPackageName());
+            if (!p.hasFec()) return;
+            Tuning.Choice c = Tuning.get(this, it.id);
+            speederCmd = buildCmd(p.speederArgsFor(c));
+            profileMode = modeText(it, p);
+            log(c == null ? "FEC level: back to the profile's own settings" : "FEC level: " + Tuning.label(p, c));
+            retuning = true;
+            Process pr = proc;
+            if (pr != null) pr.destroy();
+            notifyOngoing();
+            poke();
+        } catch (Exception e) {
+            log("Could not switch the FEC level: " + e.getMessage());
+        }
+    }
+
+    private List<String> buildCmd(List<String> args) {
+        List<String> cmd = new ArrayList<>();
+        cmd.add(new File(getApplicationInfo().nativeLibraryDir, "libspeederv2.so").getAbsolutePath());
+        cmd.addAll(args);
+        if (!args.contains("--disable-color")) cmd.add("--disable-color");
+        return cmd;
     }
 
     private Notification buildNotification() {
@@ -135,7 +179,9 @@ public class TunnelService extends Service {
             Profile p = Profile.parse(it.text, getPackageName());
             for (String n : p.notes) log(n);
             if (p.hasFec()) {
-                startSpeeder(p.speederArgs);
+                Tuning.Choice choice = Tuning.get(this, it.id);
+                if (choice != null && p.hasTiers()) log("FEC level: " + Tuning.label(p, choice));
+                startSpeeder(p.speederArgsFor(choice));
                 Thread.sleep(800);
                 if (proc == null || !proc.isAlive()) throw new Exception("speederv2 stopped right away. See the log for why.");
             }
@@ -175,24 +221,22 @@ public class TunnelService extends Service {
     }
 
     private void startSpeeder(List<String> args) {
-        List<String> cmd = new ArrayList<>();
-        cmd.add(new File(getApplicationInfo().nativeLibraryDir, "libspeederv2.so").getAbsolutePath());
-        cmd.addAll(args);
-        if (!args.contains("--disable-color")) cmd.add("--disable-color");
+        speederCmd = buildCmd(args);
         new Thread(() -> {
             while (!stopping) {
                 try {
                     log("Starting speederv2");
-                    proc = new ProcessBuilder(cmd).redirectErrorStream(true).start();
+                    proc = new ProcessBuilder(speederCmd).redirectErrorStream(true).start();
                     try (BufferedReader r = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
                         String line;
                         while ((line = r.readLine()) != null) log("speeder: " + line);
                     }
                     log("speederv2 exited with code " + proc.waitFor());
                 } catch (Exception e) {
-                    log("speederv2 failed: " + e);
+                    if (!retuning) log("speederv2 failed: " + e);       // switching level closes the helper on purpose
                 }
                 if (stopping) break;
+                if (retuning) { retuning = false; continue; }       // switched level: start the new helper at once
                 try { Thread.sleep(2000); } catch (InterruptedException e) { break; }
             }
         }, "wgfec-speeder").start();
