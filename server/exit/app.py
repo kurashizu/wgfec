@@ -46,6 +46,8 @@ LEVELS_FILE = "/etc/wg-speeder/levels.json"
 LEVEL_UNIT = "wg-speeder-level@%s.service"
 PROBE_PORT = 62933              # UDP port of wg-probe.service (net-probe echo); keep in step with --port in that unit
 PROBE_UNIT = "wg-probe.service"
+QUIC_UNIT = "wg-quic.service"
+QUIC_ENV = "/etc/wg-quic/relay.env"      # written by scripts/install-quic.sh: QUIC_PORT, QUIC_SNI
 SPEEDER_HOST = os.environ.get("WGWEB_ENDPOINT_HOST", "wg.example.com")   # same host as the WG endpoint
 SPEEDER_LOCAL_PORT = 51821      # where the client-side speederv2 listens on 127.0.0.1
 SPEEDER_CLIENT_MTU = 1280       # IPv6 needs at least 1280 on the interface; mode 0 splits/merges packets into shards
@@ -73,6 +75,27 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
 
 
 # ---------------------------------------------------------------- udpspeeder
+def quic_info():
+    """wg-quic (devices may send the FEC tunnel dressed up as QUIC): None when it is not installed, else port, name and state."""
+    try:
+        env = {}
+        with open(QUIC_ENV) as f:
+            for line in f:
+                k, _, val = line.strip().partition("=")
+                env[k] = val
+        port = int(env["QUIC_PORT"])
+        sni = env.get("QUIC_SNI", "")
+        if not 1 <= port <= 65535 or not re.fullmatch(r"[A-Za-z0-9.-]{1,100}", sni):
+            return None
+    except Exception:
+        return None
+    try:
+        state = subprocess.run(["systemctl", "is-active", QUIC_UNIT], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        state = "unknown"
+    return {"port": port, "sni": sni, "state": state}
+
+
 def probe_info():
     """The link-test probe service: the port devices should test against, and whether it is running."""
     try:
@@ -483,7 +506,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 info, enabled=True, local_port=SPEEDER_LOCAL_PORT, mtu=SPEEDER_CLIENT_MTU,
                 cmd=speeder_client_cmd(info, SPEEDER_HOST),
                 modes=dict((v, client_cmds(info, SPEEDER_HOST, v)) for v in avail),
-                running=[v for v in avail if via_ready(info, v) is None], probe=probe_info()))
+                running=[v for v in avail if via_ready(info, v) is None], probe=probe_info(), quic=quic_info()))
         m = re.match(r"^/api/peers/([A-Za-z0-9_.-]{1,32})/config$", path)
         if m:
             _, sess = self.session()
@@ -525,6 +548,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pr = probe_info()
                 if pr["state"] == "active":
                     data["probe"] = pr["port"]            # the app tests the link to this UDP port of the server
+                qi = quic_info()
+                if qi and qi["state"] == "active" and data.get("speeder"):
+                    data["quic"] = {"p": qi["port"], "s": qi["sni"]}      # the app may send the FEC tunnel to this port as QUIC
                 sys.stderr.write("%s viewed config of %s (%s)\n" % (self.client_ip(), m.group(1), via))
             return self.send_json(status, data)
         if path in ("/api/peers", "/api/status", "/api/config", "/api/logs"):

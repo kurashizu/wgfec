@@ -310,6 +310,7 @@ def main():
     ap.add_argument("server")
     ap.add_argument("--port", type=int, default=62933)
     ap.add_argument("--quic", action="store_true", help="dress the packets up as QUIC (see quicshape.py); try with --port 443")
+    ap.add_argument("--backend-port", type=int, default=62933, help="with --quic against a wg-quic relay: the local port it should forward to (the probe, default %(default)s)")
     ap.add_argument("--sni", default="www.kestrelmoor.com.au", help="server name written into the fake QUIC Initial (default %(default)s)")
     ap.add_argument("--phase", action="append", metavar="PPS:SIZE:SECONDS")
     ap.add_argument("--json", metavar="FILE", help="also write the results to this JSON file")
@@ -337,7 +338,7 @@ def main():
     if args.quic:
         if not quicshape.AVAILABLE:
             sys.exit("--quic needs the Python module 'cryptography' (pip install cryptography)")
-        cid = os.urandom(quicshape.CID_LEN)
+        cid = quicshape.make_cid(args.backend_port)
         ini, hs = quicshape.client_first_flight(cid, os.urandom(8), args.sni)
         answered = False
         for _ in range(4):

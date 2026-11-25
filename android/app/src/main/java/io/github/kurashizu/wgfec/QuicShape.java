@@ -29,8 +29,16 @@ final class QuicShape {
     private final SecretKeySpec ctrKey;
     private final Cipher enc, dec;     // enc is used by the sending thread, dec by the receiving one
 
-    QuicShape() throws GeneralSecurityException {
+    QuicShape() throws GeneralSecurityException { this(0); }
+
+    /** With a port, the first two bytes of the connection id carry it (masked), so a relay in front of the servers knows where to send the connection. */
+    QuicShape(int port) throws GeneralSecurityException {
         RNG.nextBytes(cid);
+        if (port > 0) {
+            byte[] m = Arrays.copyOf(MessageDigest.getInstance("SHA-256").digest("wgfec-quic-port".getBytes(StandardCharsets.US_ASCII)), 2);
+            cid[0] = (byte) ((port >> 8) ^ m[0]);
+            cid[1] = (byte) ((port & 0xFF) ^ m[1]);
+        }
         byte[] k = Arrays.copyOf(MessageDigest.getInstance("SHA-256").digest(concat("npr-quic".getBytes(StandardCharsets.US_ASCII), cid)), 16);
         ctrKey = new SecretKeySpec(k, "AES");
         enc = Cipher.getInstance("AES/CTR/NoPadding");

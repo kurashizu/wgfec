@@ -20,10 +20,10 @@
         <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/quicSwitch" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="10dp" android:text="Make the packets look like QUIC"/>
         <TextView android:id="@+id/quicHelp" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Wraps the test packets the way Hysteria 2 and HTTP/3 look on the wire, to see whether the network treats them differently. The server has to answer on that port (443 on servers set up for it)."
+            android:text="Wraps the test packets the way Hysteria 2 and HTTP/3 look on the wire, to see whether the network treats them differently. The server has to run wg-quic for it (see the profile's admin page)."
             android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
         <com.google.android.material.textfield.TextInputLayout android:id="@+id/portLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="UDP port to test (blank: the profile's)">
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="UDP port to test (blank: the profile's own)">
           <com.google.android.material.textfield.TextInputEditText android:id="@+id/portOverride" android:layout_width="match_parent" android:layout_height="wrap_content"
               android:inputType="number" android:maxLength="5"/>
         </com.google.android.material.textfield.TextInputLayout>
@@ -76,6 +76,18 @@
         <com.google.android.material.button.MaterialButton android:id="@+id/tuneSuggest" style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:text="Use the suggestion"
             android:visibility="gone"/>
+      </LinearLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <com.google.android.material.card.MaterialCardView android:id="@+id/tunnelQuicCard" android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="10dp" android:visibility="gone" app:cardElevation="0dp" app:cardCornerRadius="20dp" app:cardBackgroundColor="?attr/colorSurfaceContainer">
+      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="QUIC disguise"
+            android:textAppearance="?attr/textAppearanceTitleMedium" android:textStyle="bold"/>
+        <TextView android:id="@+id/tunnelQuicText" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp"
+            android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
+        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/tunnelQuicSwitch" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:text="Send this profile's tunnel as QUIC"/>
       </LinearLayout>
     </com.google.android.material.card.MaterialCardView>
 

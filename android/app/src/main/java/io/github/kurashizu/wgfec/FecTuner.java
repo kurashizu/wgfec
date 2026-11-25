@@ -72,7 +72,7 @@ final class FecTuner {
 
     private static boolean isShort(String flag) { return flag.length() == 2 && flag.charAt(0) == '-' && flag.charAt(1) != '-'; }
 
-    private static void setFlag(List<String> a, String flag, String value) {
+    static void setFlag(List<String> a, String flag, String value) {
         for (int i = 0; i < a.size(); i++) {
             String x = a.get(i);
             if (x.equals(flag)) {

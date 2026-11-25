@@ -20,7 +20,7 @@ seen by applications down to about 1% in our tests (see [docs/findings.md](docs/
 | `server/scripts/` | `configure.sh` (set your public host), `deploy.sh` (install on a server), `install-levels.sh` (start one FEC service per level). |
 | `android/` | The **WG FEC** app: WireGuard (wireguard-go, from the official tunnel library) plus a bundled `speederv2`. |
 | `tools/net-probe/` | UDP loss/latency probe (server and command line client; the Android app has the same test in its Debug tab). |
-| `docs/` | Architecture, server setup, the app-string format, port forwarding, test findings. |
+| `docs/` | Architecture, server setup, the app-string format, port forwarding, the QUIC disguise, test findings. |
 
 ## Features
 

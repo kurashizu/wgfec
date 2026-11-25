@@ -14,7 +14,8 @@ import java.util.zip.InflaterInputStream;
  *   wgfec://1z/<base64url(zlib(JSON))>   compressed
  * JSON: {"v":1, "name":"...", "wg":"<WireGuard config>", "sp":"<speederv2 client command>" (absent = direct tunnel),
  *        "tiers":[{n,l,p,u,t,i,d,s}, ...] (optional: the server's FEC levels, weakest first),
- *        "probe":62933 (optional: UDP port of the server's link-test probe)}
+ *        "probe":62933 (optional: UDP port of the server's link-test probe),
+ *        "quic":{"p":443,"s":"name"} (optional: the server accepts the FEC tunnel dressed up as QUIC on UDP port p; s is the made-up server name)}
  */
 final class AppString {
     static final String SCHEME = "wgfec://";
@@ -52,6 +53,9 @@ final class AppString {
         if (!sp.isEmpty()) t.append('\n').append(sp.trim()).append('\n');
         int probe = o.optInt("probe", 0);
         if (probe >= 1 && probe <= 65535) t.append(Profile.PROBE_PREFIX).append(' ').append(probe).append('\n');
+        JSONObject quic = o.optJSONObject("quic");
+        if (!sp.isEmpty() && quic != null && quic.optInt("p", 0) >= 1 && quic.optInt("p", 0) <= 65535 && quic.optString("s", "").matches("[A-Za-z0-9.-]{1,100}"))
+            t.append(Profile.QUIC_PREFIX).append(' ').append(quic.optInt("p")).append(' ').append(quic.optString("s")).append('\n');
         org.json.JSONArray tiers = o.optJSONArray("tiers");
         if (!sp.isEmpty() && tiers != null && tiers.length() > 0) t.append(Profile.TIERS_PREFIX).append(' ').append(tiers.toString()).append('\n');
         String name = o.optString("name", "").replaceAll("[^\\w .@-]", "");

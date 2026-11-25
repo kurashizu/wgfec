@@ -113,7 +113,8 @@ public class TunnelService extends Service {
     private String modeText(Store.Item it, Profile pm) {
         if (pm == null) return "";
         String t = Tuning.label(pm, Tuning.get(this, it.id));
-        return t == null ? pm.modeLabel() : pm.modeLabel() + " · " + t;
+        String s = t == null ? pm.modeLabel() : pm.modeLabel() + " · " + t;
+        return pm.hasQuic() && Tuning.quic(this, it.id) ? s + " · QUIC" : s;
     }
 
     /** Switch the speederv2 helper to the level now chosen for the active profile. The tunnel itself stays up. */
@@ -124,7 +125,7 @@ public class TunnelService extends Service {
             Profile p = Profile.parse(it.text, getPackageName());
             if (!p.hasFec()) return;
             Tuning.Choice c = Tuning.get(this, it.id);
-            speederCmd = buildCmd(p.speederArgsFor(c));
+            speederCmd = buildCmd(speederArgsNow(it, p));
             profileMode = modeText(it, p);
             log(c == null ? "FEC level: back to the profile's own settings" : "FEC level: " + Tuning.label(p, c));
             retuning = true;
@@ -135,6 +136,40 @@ public class TunnelService extends Service {
         } catch (Exception e) {
             log("Could not switch the FEC level: " + e.getMessage());
         }
+    }
+
+    private QuicRelay relay;
+
+    /**
+     * The helper's arguments for what the user chose for this profile. When the QUIC disguise is on, the helper is pointed at a
+     * relay on this phone that wraps its packets and sends them to the server's QUIC port; the relay is started or pointed at the
+     * right server port here, and closed when the disguise is off.
+     */
+    private synchronized List<String> speederArgsNow(Store.Item it, Profile p) throws java.io.IOException {
+        List<String> args = p.speederArgsFor(Tuning.get(this, it.id));
+        if (!(p.hasQuic() && Tuning.quic(this, it.id))) { closeRelay(); return args; }
+        String remote = FecTuner.valueOf(args, "-r");
+        int backend;
+        try { backend = Integer.parseInt(remote.substring(remote.lastIndexOf(':') + 1)); }
+        catch (Exception e) { throw new java.io.IOException("Cannot tell the server port from the speederv2 command."); }
+        if (relay == null) {
+            relay = QuicRelay.start(p.serverHost(), p.quicPort, p.quicSni, backend);
+            log("QUIC disguise: on, through UDP " + p.quicPort + " of the server to its port " + backend);
+        } else {
+            relay.retarget(backend);
+            log("QUIC disguise: on, now to the server port " + backend);
+        }
+        List<String> out = new ArrayList<>(args);
+        FecTuner.setFlag(out, "-r", "127.0.0.1:" + relay.localPort());
+        String mtu = FecTuner.valueOf(out, "--mtu");
+        if (mtu != null) {
+            try { FecTuner.setFlag(out, "--mtu", String.valueOf(Integer.parseInt(mtu) - QuicShape.OVERHEAD)); } catch (NumberFormatException ignored) { }
+        }
+        return out;
+    }
+
+    private synchronized void closeRelay() {
+        if (relay != null) { relay.close(); relay = null; log("QUIC disguise: off"); }
     }
 
     private List<String> buildCmd(List<String> args) {
@@ -181,7 +216,7 @@ public class TunnelService extends Service {
             if (p.hasFec()) {
                 Tuning.Choice choice = Tuning.get(this, it.id);
                 if (choice != null && p.hasTiers()) log("FEC level: " + Tuning.label(p, choice));
-                startSpeeder(p.speederArgsFor(choice));
+                startSpeeder(speederArgsNow(it, p));
                 Thread.sleep(800);
                 if (proc == null || !proc.isAlive()) throw new Exception("speederv2 stopped right away. See the log for why.");
             }
@@ -252,6 +287,7 @@ public class TunnelService extends Service {
             p.destroy();
             try { if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly(); } catch (InterruptedException ignored) { }
         }
+        closeRelay();
         if (monitor != null) monitor.interrupt();
         if (err != null) setState(St.ERROR, err); else setState(St.STOPPED, null);
         stopForeground(STOP_FOREGROUND_REMOVE);
@@ -262,6 +298,8 @@ public class TunnelService extends Service {
         stopping = true;
         Process p = proc;
         if (p != null) p.destroyForcibly();
+        QuicRelay r = relay;
+        if (r != null) r.close();
         if (running()) { state = St.STOPPED; poke(); }
         super.onDestroy();
     }

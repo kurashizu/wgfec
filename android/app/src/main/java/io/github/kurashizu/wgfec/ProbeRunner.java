@@ -41,7 +41,9 @@ final class ProbeRunner {
         if (running) return false;
         running = true; cancelled = false; error = null; suggestId = ""; suggestMsg = null; suggestUp = suggestDown = -1; results = new ArrayList<>();
         String h = profile.serverHost();
-        int p = portOverride > 0 ? portOverride : profile.linkTestPort();
+        // QUIC-shaped packets go to the server's QUIC port (wg-quic, which hands them to the probe), plain ones to the probe itself
+        int p = portOverride > 0 ? portOverride : quicShape ? (profile.quicPort > 0 ? profile.quicPort : 443) : profile.linkTestPort();
+        int backend = profile.linkTestPort();
         quic = quicShape;
         host = h; port = p; profileName = name; phase = 0; phases = plan.size(); sent = total = echoes = 0; stage = "starting";
         LinkProbe lp = probe = new LinkProbe();
@@ -58,13 +60,13 @@ final class ProbeRunner {
                         results = l;
                         changed();
                     }
-                }, quicShape ? QUIC_SNI : null);
+                }, quicShape ? (profile.quicSni.isEmpty() ? QUIC_SNI : profile.quicSni) : null, backend);
             } catch (java.net.UnknownHostException e) {
                 error = "Cannot resolve \"" + h + "\".";
             } catch (Exception e) {
                 error = e.getMessage() != null ? e.getMessage() : e.toString();
             } finally {
-                if (profile.hasTiers() && !quicShape && !cancelled && error == null && !results.isEmpty()) suggest(profileId, profile);
+                if (profile.hasTiers() && !cancelled && error == null && !results.isEmpty()) suggest(profileId, profile);
                 running = false;
                 changed();
             }
@@ -84,8 +86,8 @@ final class ProbeRunner {
         suggestUp = FecTuner.pick(p.tiers, lu, ProbeReport.burstyDir(rs, true));
         suggestDown = FecTuner.pick(p.tiers, ld, ProbeReport.burstyDir(rs, false));
         if (suggestUp < 0 || suggestDown < 0) { suggestUp = suggestDown = -1; return; }
-        suggestMsg = String.format(java.util.Locale.US, "Suggested by this test: downlink %s (measured %.2f %%), uplink %s (measured %.2f %%).",
-                p.tiers.get(suggestDown).name, ld, p.tiers.get(suggestUp).name, lu);
+        suggestMsg = String.format(java.util.Locale.US, "Suggested by this test%s: downlink %s (measured %.2f %%), uplink %s (measured %.2f %%).",
+                quic ? " (QUIC-shaped packets)" : "", p.tiers.get(suggestDown).name, ld, p.tiers.get(suggestUp).name, lu);
     }
 
     static void stop() {

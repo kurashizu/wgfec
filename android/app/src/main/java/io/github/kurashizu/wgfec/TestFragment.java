@@ -58,18 +58,26 @@ public class TestFragment extends Fragment {
         b.presets.check(preset == 1 ? R.id.pStandard : preset == 2 ? R.id.pThorough : R.id.pQuick);
         b.presets.setOnCheckedStateChangeListener((g, ids) -> { prefs().edit().putInt("probe_preset", preset()).apply(); renderPlan(); });
         b.quicSwitch.setChecked(prefs().getBoolean("probe_quic", false));
-        b.portOverride.setText(prefs().getString("probe_port", ""));
+        b.portOverride.setText(prefs().getString("probe_test_port", ""));
         b.quicSwitch.setOnCheckedChangeListener((sw, on) -> {
             prefs().edit().putBoolean("probe_quic", on).apply();
-            String now = String.valueOf(b.portOverride.getText()).trim();
-            if (on && now.isEmpty()) b.portOverride.setText("443");
-            else if (!on && now.equals("443")) b.portOverride.setText("");
             renderTarget();
         });
         b.portOverride.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int c, int d) { }
             @Override public void onTextChanged(CharSequence s, int a, int c, int d) { }
-            @Override public void afterTextChanged(android.text.Editable e) { prefs().edit().putString("probe_port", e.toString().trim()).apply(); renderTarget(); }
+            @Override public void afterTextChanged(android.text.Editable e) { prefs().edit().putString("probe_test_port", e.toString().trim()).apply(); renderTarget(); }
+        });
+        b.tunnelQuicSwitch.setOnCheckedChangeListener((sw, on) -> {
+            if (quicBinding) return;
+            Store.Item it = selected();
+            if (it == null) return;
+            Tuning.setQuic(requireContext(), it.id, on);
+            Store.Item act = Store.active(requireContext());
+            boolean live = TunnelService.running() && act != null && act.id.equals(it.id);
+            if (live) TunnelService.retune(requireContext());
+            Toast.makeText(requireContext(), (on ? "QUIC disguise on" : "QUIC disguise off") + (live ? " (the tunnel stays up)" : ""), Toast.LENGTH_SHORT).show();
+            renderQuic();
         });
         b.start.setOnClickListener(v -> { if (ProbeRunner.running) ProbeRunner.stop(); else start(); });
         b.copy.setOnClickListener(v -> {
@@ -149,9 +157,10 @@ public class TestFragment extends Fragment {
         if (items.isEmpty()) { b.targetHint.setText("Add a profile first (Profiles tab)."); return; }
         if (p == null) { b.targetHint.setText("This profile cannot be read."); return; }
         int port = portOverride();
-        String where = p.serverHost() + ":" + (port > 0 ? port : p.linkTestPort());
+        boolean q = b.quicSwitch.isChecked();
+        String where = p.serverHost() + ":" + (port > 0 ? port : q ? (p.quicPort > 0 ? p.quicPort : 443) : p.linkTestPort());
         String shape = b.quicSwitch.isChecked() ? " The packets look like QUIC (Initial for " + ProbeRunner.QUIC_SNI + ")." : "";
-        if (port > 0) { b.targetHint.setText("Tests UDP to " + where + "." + shape); return; }
+        if (port > 0 || q) { b.targetHint.setText("Tests UDP to " + where + "." + shape); return; }
         b.targetHint.setText(p.probePort > 0
                 ? "Tests UDP to " + where + ", the server and probe port this profile came with."
                 : "Tests UDP to " + where + ". This profile does not say which port the probe uses, so the default is tried; "
@@ -224,7 +233,24 @@ public class TestFragment extends Fragment {
     }
 
     /** The card where the user picks the FEC level of the selected profile, per direction. Only for profiles that offer levels. */
+    private boolean quicBinding;
+
+    /** The switch for sending the tunnel itself as QUIC: shown for profiles whose server offers it. */
+    private void renderQuic() {
+        Store.Item it = selected();
+        Profile p = it == null ? null : it.parsed();
+        if (p == null || !p.hasQuic()) { b.tunnelQuicCard.setVisibility(View.GONE); return; }
+        b.tunnelQuicCard.setVisibility(View.VISIBLE);
+        quicBinding = true;
+        b.tunnelQuicSwitch.setChecked(Tuning.quic(requireContext(), it.id));
+        quicBinding = false;
+        b.tunnelQuicText.setText("Sends this profile's FEC traffic to UDP " + p.quicPort + " of the server wrapped in packets that look like QUIC (Hysteria 2 / HTTP/3), "
+                + "to see whether your network lets them through better. It adds 13 bytes to each packet. "
+                + (TunnelService.running() ? "If this profile is connected, only its FEC helper restarts and the tunnel stays up." : "It takes effect the next time you connect."));
+    }
+
     private void renderTune() {
+        renderQuic();
         Store.Item it = selected();
         Profile p = it == null ? null : it.parsed();
         if (p == null || !p.hasTiers()) { b.tuneCard.setVisibility(View.GONE); return; }

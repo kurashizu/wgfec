@@ -73,7 +73,10 @@ final class LinkProbe {
     List<Result> run(String host, int port, List<Phase> plan, Listener l) throws IOException { return run(host, port, plan, l, null); }
 
     /** With a non-null {@code sni} the packets are dressed up as QUIC (see QuicShape), naming that server. */
-    List<Result> run(String host, int port, List<Phase> plan, Listener l, String sni) throws IOException {
+    List<Result> run(String host, int port, List<Phase> plan, Listener l, String sni) throws IOException { return run(host, port, plan, l, sni, 0); }
+
+    /** {@code backendPort}: with the QUIC shape, the port a wg-quic relay should forward to (the probe's own port); 0 for none. */
+    List<Result> run(String host, int port, List<Phase> plan, Listener l, String sni, int backendPort) throws IOException {
         InetAddress ip = resolve(host);
         List<Result> out = new ArrayList<>();
         try (DatagramSocket sock = new DatagramSocket()) {
@@ -82,7 +85,7 @@ final class LinkProbe {
             sock.connect(new InetSocketAddress(ip, port));
             Run run = new Run(sock);
             if (sni != null) {
-                try { run.shape = new QuicShape(); } catch (java.security.GeneralSecurityException e) { throw new IOException("QUIC shape is not available on this device: " + e.getMessage()); }
+                try { run.shape = new QuicShape(backendPort); } catch (java.security.GeneralSecurityException e) { throw new IOException("QUIC shape is not available on this device: " + e.getMessage()); }
                 run.openQuic(sni);
             }
             Thread rx = new Thread(run::receiveLoop, "linkprobe-rx");

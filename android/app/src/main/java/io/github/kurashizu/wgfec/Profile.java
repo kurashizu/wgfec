@@ -16,6 +16,10 @@ final class Profile {
     final List<FecTuner.Tier> tiers = new ArrayList<>();
     static final String TIERS_PREFIX = "# wgfec-tiers:";
     static final String PROBE_PREFIX = "# wgfec-probe:";
+    static final String QUIC_PREFIX = "# wgfec-quic:";
+    /** Where the server accepts the FEC tunnel dressed up as QUIC (wg-quic): UDP port and the made-up server name; 0 when it does not. */
+    int quicPort;
+    String quicSni = "";
     /** UDP port of the server's link-test probe, as the admin page gave it; 0 when the profile does not say. */
     int probePort;
     static final int DEFAULT_PROBE_PORT = 62933;
@@ -28,6 +32,14 @@ final class Profile {
             if (line.startsWith(TIERS_PREFIX)) { parseTiers(p, line.substring(TIERS_PREFIX.length())); continue; }
             if (line.startsWith(PROBE_PREFIX)) {
                 try { int v = Integer.parseInt(line.substring(PROBE_PREFIX.length()).trim()); if (v >= 1 && v <= 65535) p.probePort = v; } catch (NumberFormatException ignored) { }
+                continue;
+            }
+            if (line.startsWith(QUIC_PREFIX)) {
+                String[] f = line.substring(QUIC_PREFIX.length()).trim().split("\\s+");
+                try {
+                    int v = Integer.parseInt(f[0]);
+                    if (v >= 1 && v <= 65535 && f.length > 1 && f[1].matches("[A-Za-z0-9.-]{1,100}")) { p.quicPort = v; p.quicSni = f[1]; }
+                } catch (NumberFormatException ignored) { }
                 continue;
             }
             List<String> t = line.isEmpty() || line.startsWith("[") || line.startsWith("#") || line.contains("=") && !line.contains(" -")
@@ -64,6 +76,9 @@ final class Profile {
     }
 
     boolean hasFec() { return !speederArgs.isEmpty(); }
+
+    /** True when the server accepts this profile's FEC tunnel dressed up as QUIC, so the user can switch that on. */
+    boolean hasQuic() { return hasFec() && quicPort > 0; }
 
     /** The server's address without its port. */
     String serverHost() {

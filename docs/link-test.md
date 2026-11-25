@@ -57,15 +57,8 @@ Results for the same profile in different places or at different times of day te
 
 Some networks treat UDP that looks like QUIC (what Hysteria 2 and HTTP/3 use) differently from other UDP. To check, switch on
 "Make the packets look like QUIC" in the Link test, or run `probe.py --quic --port 443`, and compare with the plain test on the same
-server. Both tests are the same, only the packets differ.
+server. Both tests are the same, only the packets differ. The QUIC-shaped test goes to the server's QUIC port (the one wg-quic
+listens on, see [quic-disguise.md](quic-disguise.md)), which hands the packets to the probe, so it measures the same path the
+disguised tunnel takes. As with the plain test, it ends with a suggested FEC level that you apply yourself.
 
-What goes on the wire: a client Initial packet that is valid QUIC v1 (RFC 9001 keys, so a middlebox that decrypts it reads a TLS 1.3
-ClientHello with a made-up server name, ALPN h3 and transport parameters), a small Handshake packet, then short header packets whose
-payload is encrypted so it looks random. The server answers an Initial with an Initial+Handshake datagram no longer than the request.
-It is a disguise, not QUIC: there is no real handshake, and a server that is probed actively would not behave like a real QUIC server.
-
-Server: `quicshape.py` goes next to `probe_server.py`, the module `cryptography` must be installed, and the unit listens on
-`--port 62933 --port 443` (the unit file grants `CAP_NET_BIND_SERVICE` for that). Open UDP 443 in the firewall. Without `cryptography`
-the server logs "QUIC shape off" and only answers the plain test. The server name is `www.kestrelmoor.com.au` (it does not exist, and nothing resolves it).
-
-If something else already uses UDP 443 on the server (a Hysteria or web server, for example), remove `--port 443` from the unit: the plain test keeps working and only the QUIC-shaped test on 443 is gone.
+The packets are a disguise, not QUIC: see quic-disguise.md for what goes on the wire and what it does not do.

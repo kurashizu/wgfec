@@ -33,7 +33,14 @@ final class Tuning {
         sp(c).edit().putString("tier_" + profileId, up + "," + down + "," + System.currentTimeMillis()).apply();
     }
 
-    static void clear(Context c, String profileId) { sp(c).edit().remove("tier_" + profileId).apply(); }
+    static void clear(Context c, String profileId) { sp(c).edit().remove("tier_" + profileId).remove("quic_" + profileId).apply(); }
+
+    /** True when the user switched on sending this profile's tunnel as QUIC-looking packets. */
+    static boolean quic(Context c, String profileId) { return sp(c).getBoolean("quic_" + profileId, false); }
+
+    static void setQuic(Context c, String profileId, boolean on) {
+        if (on) sp(c).edit().putBoolean("quic_" + profileId, true).apply(); else sp(c).edit().remove("quic_" + profileId).apply();
+    }
 
     /** "down Light, up profile's own", or null when the profile is not set to a level. */
     static String label(Profile p, Choice ch) {

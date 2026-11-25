@@ -153,6 +153,26 @@ def server_first_flight(client_dcid, client_scid, limit):
     return ini + _handshake_packet(client_scid, cid, rest)
 
 
+def _port_mask():
+    return hashlib.sha256(b"wgfec-quic-port").digest()[:2]
+
+
+def make_cid(port=0):
+    """A random connection id. With a port, the first two bytes carry that port (masked, so they look random): the relay
+    in front of the FEC servers sends the connection to that local port."""
+    cid = bytearray(os.urandom(CID_LEN))
+    if port:
+        m = _port_mask()
+        cid[0] = (port >> 8) ^ m[0]
+        cid[1] = (port & 0xFF) ^ m[1]
+    return bytes(cid)
+
+
+def cid_port(cid):
+    m = _port_mask()
+    return ((cid[0] ^ m[0]) << 8) | (cid[1] ^ m[1])
+
+
 def is_long_header(data):
     return len(data) > 0 and data[0] & 0x80 != 0
 
