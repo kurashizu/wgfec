@@ -54,12 +54,52 @@ final class QuicShape {
         return new byte[][]{ini, handshake(cid, scid, 60 + RNG.nextInt(60))};
     }
 
+    // ---- what a long-lived QUIC / HTTP/3 session looks like besides its data (same as quicshape.py) -------------------------
+    // The receiver answers every few packets with a small acknowledgement, a quiet connection gets small PING packets, the
+    // connection starts with a few small request / response packets, and the spin bit flips about once per round trip.
+    // Decoys carry a marker inside the encrypted payload and are dropped by the other end.
+
+    private static final byte[] DECOY = {0, 'w', 'g', 'f', 'e', 'c', 'D', 'Y'};
+    private static final int MIN_DECOY = 12;
+    private int spinBit = RNG.nextInt(2);
+    private long spinFlipAt = System.nanoTime() / 1_000_000 + 30 + RNG.nextInt(120);
+
+    /** The payload of a decoy that is {@code wireSize} bytes on the wire (the 13 bytes of header included). */
+    static byte[] decoy(int wireSize) {
+        byte[] d = new byte[Math.max(MIN_DECOY, wireSize - OVERHEAD)];
+        RNG.nextBytes(d);
+        System.arraycopy(DECOY, 0, d, 0, DECOY.length);
+        return d;
+    }
+
+    static boolean isDecoy(byte[] b) {
+        if (b == null || b.length < DECOY.length) return false;
+        for (int i = 0; i < DECOY.length; i++) if (b[i] != DECOY[i]) return false;
+        return true;
+    }
+
+    static int ackWireSize() { return 30 + RNG.nextInt(41); }
+    static int pingWireSize() { return 26 + RNG.nextInt(23); }
+    /** How many packets received before the next acknowledgement-like decoy goes out. */
+    static int nextAckAfter() { return 5 + RNG.nextInt(8); }
+    /** Milliseconds without sending before a PING-like decoy. */
+    static long nextIdleGapMs() { return 12_000 + RNG.nextInt(18_000); }
+
+    /** Wire sizes of the small packets after the handshake on the client side (HTTP/3 settings and request). */
+    static int[] setupSizes() { return new int[]{70 + RNG.nextInt(231), 30 + RNG.nextInt(51), 30 + RNG.nextInt(41)}; }
+
+    private synchronized int spin() {
+        long now = System.nanoTime() / 1_000_000;
+        if (now >= spinFlipAt) { spinBit ^= 1; spinFlipAt = now + 30 + RNG.nextInt(120); }
+        return spinBit;
+    }
+
     /** A short header packet that carries {@code inner[0..len)}. */
-    byte[] wrap(byte[] inner, int len) throws GeneralSecurityException {
+    synchronized byte[] wrap(byte[] inner, int len) throws GeneralSecurityException {
         byte[] nonce = new byte[4];
         RNG.nextBytes(nonce);
         byte[] out = new byte[OVERHEAD + len];
-        out[0] = (byte) (0x40 | (RNG.nextInt() & 0x3F));
+        out[0] = (byte) (0x40 | (RNG.nextInt() & 0x1F) | (spin() << 5));
         System.arraycopy(cid, 0, out, 1, CID_LEN);
         System.arraycopy(nonce, 0, out, 1 + CID_LEN, 4);
         byte[] iv = new byte[16];

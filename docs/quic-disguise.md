@@ -19,6 +19,23 @@ Nothing is negotiated and there is no real QUIC or TLS. Packets only look like i
 A server that is probed actively would not behave like a real QUIC server, and a middlebox that reads the whole flow could tell it
 apart. The made-up server name is `www.kestrelmoor.com.au`; it does not exist, nothing resolves it, and you do not need a domain.
 
+## Behaves like a long-lived connection
+
+Real connections are never only data, and a flow of nothing but equal-sized packets stands out. So both ends add what a long-lived QUIC /
+HTTP/3 session (a WebSocket over HTTP/3, say) has besides its data:
+
+- **An opening exchange:** a few small packets after the handshake, like an HTTP/3 settings frame and request from the phone, and a response and
+  a session ticket (60 to 600 bytes) from the server.
+- **Acknowledgements:** the receiver answers every 5 to 12 packets with a small packet (30 to 70 bytes), the way a QUIC receiver acknowledges.
+- **PING:** a connection that has been quiet for 12 to 30 seconds gets a small packet (26 to 48 bytes).
+- **Spin bit:** the one header bit that is not random flips every 30 to 150 ms instead of being random, like a real round-trip-timed spin bit.
+
+These small packets ("decoys") carry a marker inside the encrypted payload and the other end drops them. They are a few percent of the
+bytes (about 14 % of the packets, but small ones). Phone and server must both be 0.6.0 or newer: an older app would take the server's decoys for tunnel data. The wg-quic log prints, every 30 seconds, how many data packets and decoys went each way.
+
+Not copied: connection id rotation, real flow control, or the ACK pattern being tied to the actual data. Long, patient observation of one flow
+may still tell it from the real thing.
+
 ## One port, whatever the FEC level
 
 The server listens on one UDP port for the disguise (443 by default; pick another when something else, such as Hysteria, uses 443).
@@ -42,7 +59,7 @@ In a device's config window the admin page offers three types: **Direct**, **Via
 
 ## Phone
 
-A profile whose app string has `quic` gets a "QUIC disguise" card in the Debug tab (Link test). Switching it on puts a small relay in
+A profile whose app string has `quic` gets a "QUIC disguise" card in the Debug tab (Link test), and the profile's label in the app (Home and Profiles) reads **QUIC** instead of FEC while it is on. Switching it on puts a small relay in
 the app between the speederv2 helper and the server: the helper sends to 127.0.0.1, the relay wraps each packet and sends it to the
 server's QUIC port. Like the helper, it is outside the VPN. The speederv2 `--mtu` is lowered by 13. Home shows `QUIC disguise: on`.
 Switching it on or off, or changing the FEC level, while connected restarts only the helper; the VPN stays up.

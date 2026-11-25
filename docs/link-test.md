@@ -55,10 +55,11 @@ Results for the same profile in different places or at different times of day te
 
 ## QUIC-shaped test
 
-Some networks treat UDP that looks like QUIC (what Hysteria 2 and HTTP/3 use) differently from other UDP. To check, switch on
-"Make the packets look like QUIC" in the Link test, or run `probe.py --quic --port 443`, and compare with the plain test on the same
-server. Both tests are the same, only the packets differ. The QUIC-shaped test goes to the server's QUIC port (the one wg-quic
-listens on, see [quic-disguise.md](quic-disguise.md)), which hands the packets to the probe, so it measures the same path the
-disguised tunnel takes. As with the plain test, it ends with a suggested FEC level that you apply yourself.
+Some networks treat UDP that looks like QUIC (what Hysteria 2 and HTTP/3 use) differently from other UDP. There is no switch for it in
+the test: it follows the profile. A profile that sends its tunnel as QUIC (its QUIC disguise is on, see
+[quic-disguise.md](quic-disguise.md)) is tested with QUIC-shaped packets to the server's QUIC port, which hands them to the probe, so it
+measures the same path the tunnel takes; any other profile is tested with plain UDP to the probe port. To compare the two on one
+server, switch the profile's disguise off or on in the Debug tab and run the test again. On a computer, use `probe.py --quic --port 443`
+against `wg-quic`'s port. As with the plain test, the test ends with a suggested FEC level that you apply yourself.
 
 The packets are a disguise, not QUIC: see quic-disguise.md for what goes on the wire and what it does not do.

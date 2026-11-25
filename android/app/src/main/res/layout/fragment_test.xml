@@ -17,17 +17,6 @@
         <TextView android:id="@+id/targetHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp"
             android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
 
-        <com.google.android.material.materialswitch.MaterialSwitch android:id="@+id/quicSwitch" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:layout_marginTop="10dp" android:text="Make the packets look like QUIC"/>
-        <TextView android:id="@+id/quicHelp" android:layout_width="match_parent" android:layout_height="wrap_content"
-            android:text="Wraps the test packets the way Hysteria 2 and HTTP/3 look on the wire, to see whether the network treats them differently. The server has to run wg-quic for it (see the profile's admin page)."
-            android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
-        <com.google.android.material.textfield.TextInputLayout android:id="@+id/portLayout" style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp" android:hint="UDP port to test (blank: the profile's own)">
-          <com.google.android.material.textfield.TextInputEditText android:id="@+id/portOverride" android:layout_width="match_parent" android:layout_height="wrap_content"
-              android:inputType="number" android:maxLength="5"/>
-        </com.google.android.material.textfield.TextInputLayout>
-
         <com.google.android.material.chip.ChipGroup android:id="@+id/presets" android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="12dp" app:singleSelection="true" app:selectionRequired="true">
           <com.google.android.material.chip.Chip android:id="@+id/pQuick" style="@style/Widget.Material3.Chip.Filter" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Quick" android:checkable="true"/>

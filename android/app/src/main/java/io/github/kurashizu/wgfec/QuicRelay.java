@@ -25,7 +25,13 @@ final class QuicRelay {
     private volatile boolean closed;
     private final Thread up, down;
     /** Packets handed over in each direction, for the log and tests. */
-    volatile long sent, received;
+    volatile long sent, received, decoysSent, decoysReceived;
+    private volatile long lastTx = System.nanoTime() / 1_000_000;
+    private long idleGapMs = QuicShape.nextIdleGapMs();
+    private int sinceAck, nextAck = QuicShape.nextAckAfter();
+    private volatile int[] setupLeft = new int[0];
+    private volatile long setupAt;
+    private final Thread cover;
 
     private QuicRelay(String host, int quicPort, String sni) throws IOException {
         this.sni = sni;
@@ -37,7 +43,8 @@ final class QuicRelay {
         remote.setReceiveBufferSize(1 << 20);
         up = new Thread(this::upLoop, "wgfec-quic-up");
         down = new Thread(this::downLoop, "wgfec-quic-down");
-        up.setDaemon(true); down.setDaemon(true);
+        cover = new Thread(this::coverLoop, "wgfec-quic-cover");
+        up.setDaemon(true); down.setDaemon(true); cover.setDaemon(true);
     }
 
     /** Starts a relay to host:quicPort that leads to the server's UDP port {@code backendPort}. */
@@ -46,6 +53,7 @@ final class QuicRelay {
         r.retarget(backendPort);
         r.up.start();
         r.down.start();
+        r.cover.start();
         return r;
     }
 
@@ -58,6 +66,8 @@ final class QuicRelay {
             byte[][] flight = s.firstFlight(sni);
             shape = s;
             for (byte[] f : flight) remote.send(new DatagramPacket(f, f.length, server));
+            setupAt = System.nanoTime() / 1_000_000 + 20;          // then the small request packets of an HTTP/3 start
+            setupLeft = QuicShape.setupSizes();
         } catch (GeneralSecurityException e) {
             throw new IOException("QUIC shape failed: " + e.getMessage());
         }
@@ -79,9 +89,38 @@ final class QuicRelay {
                 helper = p.getSocketAddress();
                 byte[] w = shape.wrap(buf, p.getLength());
                 remote.send(new DatagramPacket(w, w.length, server));
+                lastTx = System.nanoTime() / 1_000_000;
                 sent++;
             } catch (IOException | GeneralSecurityException e) {
                 if (closed) return;
+            }
+        }
+    }
+
+    private void decoy(int wireSize) {
+        try {
+            byte[] d = QuicShape.decoy(wireSize);
+            byte[] w = shape.wrap(d, d.length);
+            remote.send(new DatagramPacket(w, w.length, server));
+            lastTx = System.nanoTime() / 1_000_000;
+            decoysSent++;
+        } catch (IOException | GeneralSecurityException ignored) { }
+    }
+
+    /** The small packets a real connection has besides its data: the opening requests, and a PING when it has been quiet. */
+    private void coverLoop() {
+        while (!closed) {
+            try { Thread.sleep(20); } catch (InterruptedException e) { return; }
+            long now = System.nanoTime() / 1_000_000;
+            int[] left = setupLeft;
+            if (left.length > 0 && now >= setupAt) {
+                decoy(left[0]);
+                setupLeft = java.util.Arrays.copyOfRange(left, 1, left.length);
+                setupAt = now + 5 + (long) (Math.random() * 55);
+            }
+            if (now - lastTx > idleGapMs) {
+                decoy(QuicShape.pingWireSize());
+                idleGapMs = QuicShape.nextIdleGapMs();
             }
         }
     }
@@ -95,8 +134,14 @@ final class QuicRelay {
                 remote.receive(p);
                 if (QuicShape.isLongHeader(buf, p.getLength())) continue;        // the fake handshake answer
                 byte[] inner = shape.unwrap(buf, p.getLength());
+                if (inner == null) continue;
+                if (++sinceAck >= nextAck) {                                 // acknowledge what arrived, like a QUIC receiver does
+                    sinceAck = 0; nextAck = QuicShape.nextAckAfter();
+                    decoy(QuicShape.ackWireSize());
+                }
+                if (QuicShape.isDecoy(inner)) { decoysReceived++; continue; }
                 java.net.SocketAddress h = helper;
-                if (inner == null || h == null) continue;
+                if (h == null) continue;
                 local.send(new DatagramPacket(inner, inner.length, h));
                 received++;
             } catch (SocketTimeoutException e) {

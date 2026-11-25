@@ -6,6 +6,8 @@
     <color name="status_err">#EF5350</color>
     <color name="mode_fec_bg">#81C784</color>
     <color name="mode_fec_fg">#0B2E10</color>
+    <color name="mode_quic_bg">#CE93D8</color>
+    <color name="mode_quic_fg">#2A0B33</color>
     <color name="mode_direct_bg">#90CAF9</color>
     <color name="mode_direct_fg">#0B2A4A</color>
 </resources>

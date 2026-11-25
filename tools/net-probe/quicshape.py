@@ -18,7 +18,9 @@ Needs the "cryptography" package (AES). Without it AVAILABLE is False and the ca
 import hashlib
 import hmac
 import os
+import random
 import struct
+import time
 
 try:
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -186,10 +188,72 @@ def _ctr(cid, nonce):
     return Cipher(algorithms.AES(key), modes.CTR(nonce + bytes(12))).encryptor()
 
 
-def wrap(cid, inner):
-    """A short header packet carrying the net-probe packet `inner`."""
+# ---- what a long-lived QUIC / HTTP/3 session looks like besides its data ---------------------------------------------
+#
+# Real connections are never only data: the receiver answers every few packets with a small acknowledgement, an idle
+# connection is kept alive with small PING packets, the connection starts with a few small request / response packets,
+# and the spin bit (the one header bit that is not random) flips about once per round trip. We copy those so that a flow
+# does not look like "nothing but equal-sized data". The decoys carry a marker inside the encrypted payload and are dropped
+# by the other end; they cost a few percent of the bytes.
+
+DECOY = b"\x00wgfecDY"      # first 8 bytes of a decoy's payload (hidden by the encryption)
+MIN_DECOY = 12
+
+
+def decoy(wire_size):
+    """The payload of a decoy packet that will be `wire_size` bytes on the wire (13 bytes of header included)."""
+    return DECOY + os.urandom(max(MIN_DECOY, wire_size - OVERHEAD) - len(DECOY))
+
+
+def is_decoy(inner):
+    return inner[:8] == DECOY
+
+
+def ack_wire_size():
+    return random.randint(30, 70)
+
+
+def ping_wire_size():
+    return random.randint(26, 48)
+
+
+def next_ack_after():
+    """How many packets received before the next acknowledgement-like decoy goes out."""
+    return random.randint(5, 12)
+
+
+def next_idle_gap():
+    """Seconds without sending before a PING-like decoy."""
+    return random.uniform(12.0, 30.0)
+
+
+def setup_sizes(server):
+    """Wire sizes of the small packets that follow the handshake: the HTTP/3 settings and request on the client side,
+    the response and a session ticket on the server side."""
+    if server:
+        return [random.randint(60, 140), random.randint(30, 90), random.randint(260, 620)]
+    return [random.randint(70, 300), random.randint(30, 80), random.randint(30, 70)]
+
+
+class Spin(object):
+    """The spin bit: constant for a while, then flipped, about once per round trip."""
+
+    def __init__(self):
+        self.bit = random.getrandbits(1)
+        self.flip_at = time.monotonic() + random.uniform(0.03, 0.15)
+
+    def get(self, now=None):
+        now = time.monotonic() if now is None else now
+        if now >= self.flip_at:
+            self.bit ^= 1
+            self.flip_at = now + random.uniform(0.03, 0.15)
+        return self.bit
+
+
+def wrap(cid, inner, spin=None):
+    """A short header packet carrying the net-probe packet `inner`. spin: 0 or 1 for the spin bit (None: random)."""
     nonce = os.urandom(4)
-    first = 0x40 | (os.urandom(1)[0] & 0x3F)
+    first = 0x40 | (os.urandom(1)[0] & 0x1F) | (0x20 if (os.urandom(1)[0] & 1 if spin is None else spin) else 0)
     return bytes([first]) + cid + nonce + _ctr(cid, nonce).update(inner)
 
 

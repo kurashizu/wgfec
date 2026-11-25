@@ -72,7 +72,7 @@ public class ProfilesFragment extends Fragment {
         Profile p = it.parsed();
         h.v.name.setText(it.name);
         h.v.info.setText(p == null ? "This profile is not valid." : p.detail());
-        Ui.modeBadge(h.v.mode, p);
+        Ui.modeBadge(h.v.mode, p, it.id);
         boolean active = it.id.equals(activeId);
         h.v.badge.setVisibility(active ? View.VISIBLE : View.GONE);
         h.v.card.setStrokeWidth(active ? (int) (2 * getResources().getDisplayMetrics().density) : 0);

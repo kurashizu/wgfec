@@ -57,17 +57,6 @@ public class TestFragment extends Fragment {
         b.profilePick.setOnItemClickListener((parent, v, pos, id) -> { selectedId = items.get(pos).id; prefs().edit().putString("probe_profile", selectedId).apply(); render(); });
         b.presets.check(preset == 1 ? R.id.pStandard : preset == 2 ? R.id.pThorough : R.id.pQuick);
         b.presets.setOnCheckedStateChangeListener((g, ids) -> { prefs().edit().putInt("probe_preset", preset()).apply(); renderPlan(); });
-        b.quicSwitch.setChecked(prefs().getBoolean("probe_quic", false));
-        b.portOverride.setText(prefs().getString("probe_test_port", ""));
-        b.quicSwitch.setOnCheckedChangeListener((sw, on) -> {
-            prefs().edit().putBoolean("probe_quic", on).apply();
-            renderTarget();
-        });
-        b.portOverride.addTextChangedListener(new android.text.TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int c, int d) { }
-            @Override public void onTextChanged(CharSequence s, int a, int c, int d) { }
-            @Override public void afterTextChanged(android.text.Editable e) { prefs().edit().putString("probe_test_port", e.toString().trim()).apply(); renderTarget(); }
-        });
         b.tunnelQuicSwitch.setOnCheckedChangeListener((sw, on) -> {
             if (quicBinding) return;
             Store.Item it = selected();
@@ -78,6 +67,7 @@ public class TestFragment extends Fragment {
             if (live) TunnelService.retune(requireContext());
             Toast.makeText(requireContext(), (on ? "QUIC disguise on" : "QUIC disguise off") + (live ? " (the tunnel stays up)" : ""), Toast.LENGTH_SHORT).show();
             renderQuic();
+            renderTarget();
         });
         b.start.setOnClickListener(v -> { if (ProbeRunner.running) ProbeRunner.stop(); else start(); });
         b.copy.setOnClickListener(v -> {
@@ -151,28 +141,27 @@ public class TestFragment extends Fragment {
                 sb, Fmt.bytes(bytes), secs));
     }
 
-    /** What the test will talk to, from the profile. */
+    /** True when the tunnel of this profile is set to go out as QUIC: the test then uses the same kind of packets. */
+    private boolean quicMode(Store.Item it, Profile p) {
+        return it != null && p != null && p.hasQuic() && Tuning.quic(requireContext(), it.id);
+    }
+
+    /** What the test will talk to, from the profile and the mode it was set up with. */
     private void renderTarget() {
+        Store.Item it = selected();
         Profile p = selectedProfile();
         if (items.isEmpty()) { b.targetHint.setText("Add a profile first (Profiles tab)."); return; }
         if (p == null) { b.targetHint.setText("This profile cannot be read."); return; }
-        int port = portOverride();
-        boolean q = b.quicSwitch.isChecked();
-        String where = p.serverHost() + ":" + (port > 0 ? port : q ? (p.quicPort > 0 ? p.quicPort : 443) : p.linkTestPort());
-        String shape = b.quicSwitch.isChecked() ? " The packets look like QUIC (Initial for " + ProbeRunner.QUIC_SNI + ")." : "";
-        if (port > 0 || q) { b.targetHint.setText("Tests UDP to " + where + "." + shape); return; }
+        if (quicMode(it, p)) {
+            b.targetHint.setText("Tests UDP to " + p.serverHost() + ":" + p.quicPort + " with packets that look like QUIC, the way this profile's tunnel is sent "
+                    + "(its QUIC disguise is on). Switch the disguise off below to test plain UDP.");
+            return;
+        }
+        String where = p.serverHost() + ":" + p.linkTestPort();
         b.targetHint.setText(p.probePort > 0
                 ? "Tests UDP to " + where + ", the server and probe port this profile came with."
                 : "Tests UDP to " + where + ". This profile does not say which port the probe uses, so the default is tried; "
                 + "import its app string again from the admin page to store the right one.");
-    }
-
-    /** The port typed in the field, or 0 for the profile's own. */
-    private int portOverride() {
-        try {
-            int v = Integer.parseInt(String.valueOf(b.portOverride.getText()).trim());
-            return v >= 1 && v <= 65535 ? v : 0;
-        } catch (NumberFormatException e) { return 0; }
     }
 
     private void start() {
@@ -181,7 +170,7 @@ public class TestFragment extends Fragment {
         if (it == null || p == null) { Toast.makeText(requireContext(), "Pick a profile first.", Toast.LENGTH_SHORT).show(); return; }
         prefs().edit().putInt("probe_preset", preset()).apply();
         List<LinkProbe.Phase> plan = new ArrayList<>(Arrays.asList(PRESETS[preset()]));
-        ProbeRunner.start(requireContext(), it.id, it.name, p, plan, b.quicSwitch.isChecked(), portOverride());
+        ProbeRunner.start(requireContext(), it.id, it.name, p, plan, quicMode(it, p), 0);
     }
 
     private String exportText() {
@@ -287,8 +276,6 @@ public class TestFragment extends Fragment {
         renderTarget();
         renderTune();
         b.profilePick.setEnabled(!running);
-        b.quicSwitch.setEnabled(!running);
-        b.portLayout.setEnabled(!running);
         for (int i = 0; i < b.presets.getChildCount(); i++) b.presets.getChildAt(i).setEnabled(!running);
         b.progress.setVisibility(running ? View.VISIBLE : View.GONE);
         b.status.setVisibility(running || ProbeRunner.error != null ? View.VISIBLE : View.GONE);

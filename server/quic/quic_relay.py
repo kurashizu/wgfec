@@ -40,10 +40,14 @@ def parse_ports(spec):
 
 
 class Conn(object):
-    __slots__ = ("cid", "addr", "port", "sock", "last")
+    __slots__ = ("cid", "addr", "port", "sock", "last", "spin", "rx", "next_ack", "last_tx", "idle", "n")
 
     def __init__(self, cid, addr, port, sock, now):
         self.cid, self.addr, self.port, self.sock, self.last = cid, addr, port, sock, now
+        self.spin = quicshape.Spin()
+        self.rx, self.next_ack = 0, quicshape.next_ack_after()      # packets since the last acknowledgement-like decoy
+        self.last_tx, self.idle = now, quicshape.next_idle_gap()
+        self.n = [0, 0, 0, 0]     # data from the device, data to it, decoys from it, decoys to it (for the log)
 
 
 def main():
@@ -73,6 +77,15 @@ def main():
         buckets[ip] = (tokens - 1.0, now)
         return True
 
+    def send(c, inner, now):
+        """One packet to the device, in the QUIC wrapper (data from the backend, or a decoy)."""
+        c.n[3 if quicshape.is_decoy(inner) else 1] += 1
+        try:
+            lsock.sendto(quicshape.wrap(c.cid, inner, c.spin.get(now)), c.addr)
+        except OSError:
+            pass
+        c.last_tx = now
+
     def drop(c):
         conns.pop(c.cid, None)
         by_sock.pop(c.sock, None)
@@ -88,8 +101,15 @@ def main():
             last_purge = now
             for c in [c for c in conns.values() if now - c.last > IDLE]:
                 drop(c)
+            for c in conns.values():
+                if sum(c.n):
+                    log("connection to port %d: data %d up / %d down, decoys %d up / %d down" % (c.port, c.n[0], c.n[1], c.n[2], c.n[3]))
             for ip in [ip for ip, (_, t) in buckets.items() if now - t > 60]:
                 del buckets[ip]
+        for c in list(conns.values()):               # a quiet connection gets a small PING-like packet now and then
+            if now - c.last_tx > c.idle:
+                send(c, quicshape.decoy(quicshape.ping_wire_size()), now)
+                c.idle = quicshape.next_idle_gap()
         for s in ready:
             if s is lsock:
                 for _ in range(64):                  # drain what is waiting
@@ -121,7 +141,18 @@ def main():
                         c = conns[cid] = Conn(cid, addr, port, bs, now)
                         by_sock[bs] = c
                         log("connection from %s to local port %d (%d open)" % (addr[0], port, len(conns)))
+                        c.addr = addr
+                        for size in quicshape.setup_sizes(True):      # the response and session ticket of an HTTP/3 start
+                            send(c, quicshape.decoy(size), now)
                     c.addr, c.last = addr, now
+                    c.rx += 1
+                    if c.rx >= c.next_ack:                # acknowledge what arrived, like a QUIC receiver does
+                        c.rx, c.next_ack = 0, quicshape.next_ack_after()
+                        send(c, quicshape.decoy(quicshape.ack_wire_size()), now)
+                    if quicshape.is_decoy(inner):
+                        c.n[2] += 1
+                        continue
+                    c.n[0] += 1
                     try:
                         c.sock.send(inner)
                     except OSError:
@@ -138,10 +169,7 @@ def main():
                     except OSError:
                         break
                     c.last = now
-                    try:
-                        lsock.sendto(quicshape.wrap(c.cid, data), c.addr)
-                    except OSError:
-                        pass
+                    send(c, data, now)
 
 
 if __name__ == "__main__":

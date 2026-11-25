@@ -100,7 +100,7 @@ public class HomeFragment extends Fragment {
             b.profName.setText(it.name);
             Profile p = it.parsed();
             b.profInfo.setText(p == null ? "This profile is not valid." : p.detail());
-            Ui.modeBadge(b.profMode, p);
+            Ui.modeBadge(b.profMode, p, it.id);
             // FEC level of a profile that offers several: what it is set to, and a tap opens its link test to change it
             if (p != null && (p.hasTiers() || p.hasQuic())) {
                 String lab = Tuning.label(p, Tuning.get(requireContext(), it.id));
