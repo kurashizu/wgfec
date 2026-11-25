@@ -57,18 +57,6 @@ public class TestFragment extends Fragment {
         b.profilePick.setOnItemClickListener((parent, v, pos, id) -> { selectedId = items.get(pos).id; prefs().edit().putString("probe_profile", selectedId).apply(); render(); });
         b.presets.check(preset == 1 ? R.id.pStandard : preset == 2 ? R.id.pThorough : R.id.pQuick);
         b.presets.setOnCheckedStateChangeListener((g, ids) -> { prefs().edit().putInt("probe_preset", preset()).apply(); renderPlan(); });
-        b.tunnelQuicSwitch.setOnCheckedChangeListener((sw, on) -> {
-            if (quicBinding) return;
-            Store.Item it = selected();
-            if (it == null) return;
-            Tuning.setQuic(requireContext(), it.id, on);
-            Store.Item act = Store.active(requireContext());
-            boolean live = TunnelService.running() && act != null && act.id.equals(it.id);
-            if (live) TunnelService.retune(requireContext());
-            Toast.makeText(requireContext(), (on ? "QUIC disguise on" : "QUIC disguise off") + (live ? " (the tunnel stays up)" : ""), Toast.LENGTH_SHORT).show();
-            renderQuic();
-            renderTarget();
-        });
         b.start.setOnClickListener(v -> { if (ProbeRunner.running) ProbeRunner.stop(); else start(); });
         b.copy.setOnClickListener(v -> {
             ((ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("link test", exportText()));
@@ -154,7 +142,7 @@ public class TestFragment extends Fragment {
         if (p == null) { b.targetHint.setText("This profile cannot be read."); return; }
         if (quicMode(it, p)) {
             b.targetHint.setText("Tests UDP to " + p.serverHost() + ":" + p.quicPort + " with packets that look like QUIC, the way this profile's tunnel is sent "
-                    + "(its QUIC disguise is on). Switch the disguise off below to test plain UDP.");
+                    + "(this profile was imported as FEC over QUIC).");
             return;
         }
         String where = p.serverHost() + ":" + p.linkTestPort();
@@ -222,24 +210,7 @@ public class TestFragment extends Fragment {
     }
 
     /** The card where the user picks the FEC level of the selected profile, per direction. Only for profiles that offer levels. */
-    private boolean quicBinding;
-
-    /** The switch for sending the tunnel itself as QUIC: shown for profiles whose server offers it. */
-    private void renderQuic() {
-        Store.Item it = selected();
-        Profile p = it == null ? null : it.parsed();
-        if (p == null || !p.hasQuic()) { b.tunnelQuicCard.setVisibility(View.GONE); return; }
-        b.tunnelQuicCard.setVisibility(View.VISIBLE);
-        quicBinding = true;
-        b.tunnelQuicSwitch.setChecked(Tuning.quic(requireContext(), it.id));
-        quicBinding = false;
-        b.tunnelQuicText.setText("Sends this profile's FEC traffic to UDP " + p.quicPort + " of the server wrapped in packets that look like QUIC (Hysteria 2 / HTTP/3), "
-                + "to see whether your network lets them through better. It adds 13 bytes to each packet. "
-                + (TunnelService.running() ? "If this profile is connected, only its FEC helper restarts and the tunnel stays up." : "It takes effect the next time you connect."));
-    }
-
     private void renderTune() {
-        renderQuic();
         Store.Item it = selected();
         Profile p = it == null ? null : it.parsed();
         if (p == null || !p.hasTiers()) { b.tuneCard.setVisibility(View.GONE); return; }

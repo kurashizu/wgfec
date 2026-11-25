@@ -52,7 +52,7 @@ final class Importer {
         final boolean startQuic = quicOn && p.hasQuic();
         new MaterialAlertDialogBuilder(a)
                 .setTitle("Add profile")
-                .setMessage(p.describe() + (startQuic ? "\nQUIC disguise: on (you can switch it off in Debug)" : p.hasQuic() ? "\nQUIC disguise: available, off (switch it on in Debug)" : ""))
+                .setMessage(startQuic ? p.describe().replace("Mode: FEC (WireGuard through speederv2)", "Mode: FEC over QUIC (WireGuard through speederv2, sent as QUIC)") : p.describe())
                 .setView(wrap)
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Add", (d, w) -> {

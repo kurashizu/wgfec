@@ -54,15 +54,15 @@ It installs `quic_relay.py` and `quicshape.py` into `/opt/wg-quic`, the settings
 provider's security list. The relay only ever forwards to the ports listed in `QUIC_ALLOW` (the main FEC port, the level ports,
 and the link-test probe), so it is not an open relay; it limits each source address and the number of connections.
 
-The admin page shows it on the service page and adds `"quic":{"p":PORT,"s":NAME}` to the app string; the app then offers the switch.
-In a device's config window the admin page offers three types: **Direct**, **Via UDPspeeder (FEC)** and **FEC over QUIC** (only when wg-quic runs). The QUIC view adds `"qd":1` to the app string so the app starts with the disguise on. The WireGuard config and the speederv2 command are the same as for FEC, because only the Android app can do the disguise; the page says so.
+The admin page shows it on the service page and adds `"quic":{"p":PORT,"s":NAME}` to the app string.
+In a device's config window the admin page offers three types: **Direct**, **Via UDPspeeder (FEC)** and **FEC over QUIC** (only when wg-quic runs). The mode of a profile is decided when it is imported, not in the app: the QUIC view adds `"qd":1` to the app string, and the app then sends that profile as QUIC; there is no switch in the app. To use the other type, import the device again from the admin page with that type chosen (a second profile). The WireGuard config and the speederv2 command are the same as for FEC, because only the Android app can do the disguise; the page says so.
 
 ## Phone
 
-A profile whose app string has `quic` gets a "QUIC disguise" card in the Debug tab (Link test), and the profile's label in the app (Home and Profiles) reads **QUIC** instead of FEC while it is on. Switching it on puts a small relay in
-the app between the speederv2 helper and the server: the helper sends to 127.0.0.1, the relay wraps each packet and sends it to the
-server's QUIC port. Like the helper, it is outside the VPN. The speederv2 `--mtu` is lowered by 13. Home shows `QUIC disguise: on`.
-Switching it on or off, or changing the FEC level, while connected restarts only the helper; the VPN stays up.
+A profile imported as **FEC over QUIC** is labelled **QUIC** in the app (Home and Profiles; purple) instead of FEC. For it the app puts a small relay
+between the speederv2 helper and the server: the helper sends to 127.0.0.1, the relay wraps each packet and sends it to the
+server's QUIC port. Like the helper, it is outside the VPN. The speederv2 `--mtu` is lowered by 13. The mode cannot be changed in the app;
+changing the FEC level while connected restarts only the helper and the VPN stays up.
 
 ## Cost
 

@@ -102,11 +102,9 @@ public class HomeFragment extends Fragment {
             b.profInfo.setText(p == null ? "This profile is not valid." : p.detail());
             Ui.modeBadge(b.profMode, p, it.id);
             // FEC level of a profile that offers several: what it is set to, and a tap opens its link test to change it
-            if (p != null && (p.hasTiers() || p.hasQuic())) {
+            if (p != null && p.hasTiers()) {
                 String lab = Tuning.label(p, Tuning.get(requireContext(), it.id));
-                String line = p.hasTiers() ? "FEC level: " + (lab == null ? "profile's own settings" : lab) : "";
-                if (p.hasQuic()) line += (line.isEmpty() ? "" : " · ") + "QUIC disguise: " + (Tuning.quic(requireContext(), it.id) ? "on" : "off");
-                b.profLevel.setText(line);
+                b.profLevel.setText("FEC level: " + (lab == null ? "profile's own settings" : lab));
                 b.profLevel.setVisibility(View.VISIBLE);
                 b.profLevel.setOnClickListener(v -> ((MainActivity) requireActivity()).openLinkTest(it.id));
             } else b.profLevel.setVisibility(View.GONE);
