@@ -3,24 +3,17 @@
     <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Link test"
         android:textAppearance="?attr/textAppearanceHeadlineSmall" android:textStyle="bold"/>
     <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="2dp" android:paddingBottom="12dp"
-        android:text="Measures UDP loss, latency and jitter between this phone and your server, separately for each direction. It does not go through the tunnel, so it shows what the network does to plain UDP."
+        android:text="Measures UDP loss, latency and jitter between this phone and the server of a profile, separately for each direction. It does not go through the tunnel, so it shows what the network does to plain UDP."
         android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
 
     <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content"
         app:cardElevation="0dp" app:cardCornerRadius="20dp" app:cardBackgroundColor="?attr/colorSurfaceContainer">
       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
-        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
-          <com.google.android.material.textfield.TextInputLayout style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-              android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:hint="Server">
-            <com.google.android.material.textfield.TextInputEditText android:id="@+id/host" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:inputType="textUri" android:singleLine="true"/>
-          </com.google.android.material.textfield.TextInputLayout>
-          <com.google.android.material.textfield.TextInputLayout style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
-              android:layout_width="110dp" android:layout_height="wrap_content" android:layout_marginStart="8dp" android:hint="UDP port">
-            <com.google.android.material.textfield.TextInputEditText android:id="@+id/port" android:layout_width="match_parent" android:layout_height="wrap_content"
-                android:inputType="number" android:singleLine="true"/>
-          </com.google.android.material.textfield.TextInputLayout>
-        </LinearLayout>
+        <com.google.android.material.textfield.TextInputLayout style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Profile">
+          <com.google.android.material.textfield.MaterialAutoCompleteTextView android:id="@+id/profilePick"
+              android:layout_width="match_parent" android:layout_height="wrap_content" android:inputType="none"/>
+        </com.google.android.material.textfield.TextInputLayout>
         <TextView android:id="@+id/targetHint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp"
             android:textAppearance="?attr/textAppearanceBodySmall" android:textColor="?attr/colorOnSurfaceVariant"/>
 

@@ -15,6 +15,10 @@ final class Profile {
     /** The server's FEC levels, weakest first (empty when the server has none or this is not an FEC profile). */
     final List<FecTuner.Tier> tiers = new ArrayList<>();
     static final String TIERS_PREFIX = "# wgfec-tiers:";
+    static final String PROBE_PREFIX = "# wgfec-probe:";
+    /** UDP port of the server's link-test probe, as the admin page gave it; 0 when the profile does not say. */
+    int probePort;
+    static final int DEFAULT_PROBE_PORT = 62933;
 
     static Profile parse(String text, String ownPackage) throws Exception {
         Profile p = new Profile();
@@ -22,6 +26,10 @@ final class Profile {
         for (String raw : text.split("\r?\n")) {
             String line = raw.trim();
             if (line.startsWith(TIERS_PREFIX)) { parseTiers(p, line.substring(TIERS_PREFIX.length())); continue; }
+            if (line.startsWith(PROBE_PREFIX)) {
+                try { int v = Integer.parseInt(line.substring(PROBE_PREFIX.length()).trim()); if (v >= 1 && v <= 65535) p.probePort = v; } catch (NumberFormatException ignored) { }
+                continue;
+            }
             List<String> t = line.isEmpty() || line.startsWith("[") || line.startsWith("#") || line.contains("=") && !line.contains(" -")
                     ? null : tokens(line);
             String prog = null;
@@ -56,6 +64,16 @@ final class Profile {
     }
 
     boolean hasFec() { return !speederArgs.isEmpty(); }
+
+    /** The server's address without its port. */
+    String serverHost() {
+        if (server.startsWith("[")) { int e = server.indexOf(']'); return e > 0 ? server.substring(1, e) : server; }
+        int i = server.lastIndexOf(':');
+        return i > 0 ? server.substring(0, i) : server;
+    }
+
+    /** The UDP port the link test uses on the server: the one in the profile, or the default when it does not say. */
+    int linkTestPort() { return probePort > 0 ? probePort : DEFAULT_PROBE_PORT; }
 
     /** True when the app can switch this profile between several FEC levels. */
     boolean hasTiers() { return hasFec() && tiers.size() > 1; }

@@ -44,6 +44,8 @@ SERVICE_ACTIONS = ("start", "stop", "restart")
 SPEEDER_ENV = "/etc/wg-speeder/speeder.env"
 LEVELS_FILE = "/etc/wg-speeder/levels.json"
 LEVEL_UNIT = "wg-speeder-level@%s.service"
+PROBE_PORT = 62933              # UDP port of wg-probe.service (net-probe echo); keep in step with --port in that unit
+PROBE_UNIT = "wg-probe.service"
 SPEEDER_HOST = os.environ.get("WGWEB_ENDPOINT_HOST", "wg.example.com")   # same host as the WG endpoint
 SPEEDER_LOCAL_PORT = 51821      # where the client-side speederv2 listens on 127.0.0.1
 SPEEDER_CLIENT_MTU = 1280       # IPv6 needs at least 1280 on the interface; mode 0 splits/merges packets into shards
@@ -71,6 +73,15 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; "
 
 
 # ---------------------------------------------------------------- udpspeeder
+def probe_info():
+    """The link-test probe service: the port devices should test against, and whether it is running."""
+    try:
+        state = subprocess.run(["systemctl", "is-active", PROBE_UNIT], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        state = "unknown"
+    return {"port": PROBE_PORT, "state": state}
+
+
 def levels_info():
     """The FEC levels (see wg-admin) with the state of each level's service, or None when levels are not set up."""
     try:
@@ -472,7 +483,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 info, enabled=True, local_port=SPEEDER_LOCAL_PORT, mtu=SPEEDER_CLIENT_MTU,
                 cmd=speeder_client_cmd(info, SPEEDER_HOST),
                 modes=dict((v, client_cmds(info, SPEEDER_HOST, v)) for v in avail),
-                running=[v for v in avail if via_ready(info, v) is None]))
+                running=[v for v in avail if via_ready(info, v) is None], probe=probe_info()))
         m = re.match(r"^/api/peers/([A-Za-z0-9_.-]{1,32})/config$", path)
         if m:
             _, sess = self.session()
@@ -511,6 +522,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             data["tiers"] = tiers_for_app(sinfo)
                     except ValueError:
                         return self.send_json(500, {"error": "Could not build the client config"})
+                pr = probe_info()
+                if pr["state"] == "active":
+                    data["probe"] = pr["port"]            # the app tests the link to this UDP port of the server
                 sys.stderr.write("%s viewed config of %s (%s)\n" % (self.client_ip(), m.group(1), via))
             return self.send_json(status, data)
         if path in ("/api/peers", "/api/status", "/api/config", "/api/logs"):

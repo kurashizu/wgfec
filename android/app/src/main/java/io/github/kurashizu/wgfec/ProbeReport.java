@@ -131,9 +131,9 @@ final class ProbeReport {
         return s.toString();
     }
 
-    static String export(String host, int port, List<LinkProbe.Result> rs) {
+    static String export(String profile, String host, int port, List<LinkProbe.Result> rs) {
         StringBuilder s = new StringBuilder();
-        s.append("wgfec UDP link test to ").append(host).append(':').append(port).append('\n');
+        s.append("wgfec UDP link test, profile ").append(profile).append(", to ").append(host).append(':').append(port).append('\n');
         for (int i = 0; i < rs.size(); i++) {
             s.append("\nPhase ").append(i + 1).append(": ").append(title(rs.get(i))).append('\n').append(body(rs.get(i))).append('\n');
         }

@@ -15,6 +15,7 @@ wgfec://1z/<base64url(zlib(JSON))>   zlib-compressed (browsers that support Comp
 | `name` | Suggested profile name. The app strips characters outside letters, digits, space, `. _ @ -`. |
 | `wg` | The WireGuard client config (the `[Interface]` and `[Peer]` sections). |
 | `sp` | Optional. The `speederv2 -c ...` client command. Absent for a direct tunnel: the app then runs plain WireGuard without FEC. |
+| `probe` | Optional. The UDP port of the server's link-test probe (`wg-probe.service`). The app tests the link to the profile's server on this port. Present for direct and FEC devices when the probe service is running. |
 | `tiers` | Optional, only with `sp`. The server's FEC levels, weakest first, so the app can switch between them: `n` name, `l` the link loss it is meant for (%), `p` server UDP port, `u` / `t` / `i` uplink FEC table, max wait and interleave, `d` / `s` decode buffer and socket buffer. |
 
 The app adds `ExcludedApplications = <its own package>` to the config so the helper process bypasses the tunnel, runs

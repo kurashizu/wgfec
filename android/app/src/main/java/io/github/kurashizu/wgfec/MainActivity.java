@@ -36,6 +36,13 @@ public class MainActivity extends AppCompatActivity {
 
     void select(int navId) { b.nav.setSelectedItemId(navId); }
 
+    /** Open the Debug tab's Link test for one profile. */
+    void openLinkTest(String profileId) {
+        DebugFragment.pendingPane = "test";
+        TestFragment.pendingProfileId = profileId;
+        select(R.id.nav_debug);
+    }
+
     /** Open the Debug tab on its Log pane. */
     void openLog() {
         DebugFragment.pendingPane = "log";

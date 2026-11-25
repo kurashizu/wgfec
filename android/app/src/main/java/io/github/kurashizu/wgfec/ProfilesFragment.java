@@ -86,7 +86,8 @@ public class ProfilesFragment extends Fragment {
             m.inflate(R.menu.profile_item);
             m.setOnMenuItemClickListener(mi -> {
                 int id = mi.getItemId();
-                if (id == R.id.act_details) details(it);
+                if (id == R.id.act_test) ((MainActivity) requireActivity()).openLinkTest(it.id);
+                else if (id == R.id.act_details) details(it);
                 else if (id == R.id.act_rename) rename(it);
                 else delete(it, active);
                 return true;

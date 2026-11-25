@@ -1,7 +1,7 @@
 # Link test (Debug tab)
 
-The Debug tab of the app has a **Link test**: it measures the plain UDP path between the phone and a server, in both
-directions, and tells you what the network does to UDP (loss, latency, jitter, how losses cluster). It does not go
+The Debug tab of the app has a **Link test**, and every profile has a **Test link** entry in its menu. It measures the
+plain UDP path between the phone and the profile's server, in both directions, and tells you what the network does to UDP (loss, latency, jitter, how losses cluster). It does not go
 through the tunnel (the app is excluded from its own VPN), so it works with the tunnel up or down.
 
 What you get per phase: uplink loss (phone to server), downlink loss (server to phone), round-trip loss, RTT
@@ -25,8 +25,7 @@ losses come in bursts. With no loss it picks the weakest level, which costs the 
 
 The choice is remembered per profile and shown on the Home screen and in the **FEC level** card. If the tunnel is up,
 only the `speederv2` helper is restarted, so the VPN stays connected. **Use the profile's own settings** goes back to the
-settings in the app string. The result only applies when the tested server is the profile's own server (both names are
-resolved and compared), so testing some other host never changes a profile.
+settings in the app string. The test always runs against the profile's own server, so its result belongs to that profile and nothing else.
 
 Nothing runs by itself: the level changes only when you tap the button.
 
@@ -50,6 +49,8 @@ it keeps little state, and the unit runs it as a dynamic user with a 64 MB memor
 
 ## Using it
 
-Open Debug, then Link test. (Link test needs UDP 62933 open; the FEC levels need UDP 62940-62944, see [server-setup.md](server-setup.md).) The server field starts from the active profile's server; change it to any host that runs
-the service, and the port if you changed it. Test results for the same server in different places or at different times
-of day are what tells you whether loss is random, bursty, or a rate limit.
+Pick a profile: Profiles, the profile's menu, **Test link**; or Debug, Link test, and choose the profile. The target is the
+profile's own server and the probe port the admin page put into its app string (`probe`). Link test needs that UDP port open
+(62933 by default); the FEC levels need UDP 62940-62944, see [server-setup.md](server-setup.md). A profile imported before the
+`probe` field existed has no port stored, so the default 62933 is tried; import its app string again to store the right one.
+Results for the same profile in different places or at different times of day tell you whether loss is random, bursty, or a rate limit.

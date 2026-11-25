@@ -10,7 +10,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
-import android.widget.TextView;
+import android.widget.ArrayAdapter;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -25,10 +25,15 @@ import java.util.Locale;
 import io.github.kurashizu.wgfec.databinding.FragmentTestBinding;
 import io.github.kurashizu.wgfec.databinding.ItemProbeCardBinding;
 
-/** Measures UDP loss, latency and jitter between the phone and the server, outside the tunnel. */
+/**
+ * Link test of one profile: measures UDP loss, latency and jitter between the phone and that profile's server, outside the
+ * tunnel. The target (the server's address and its probe port) comes from the profile, and for a profile with several FEC
+ * levels the test also picks the level to use.
+ */
 public class TestFragment extends Fragment {
-    static final int DEFAULT_PORT = 62933;
-    private static final String[] PRESET_NAMES = {"Quick", "Standard", "Thorough"};
+    /** Set by other screens to open the test for one profile the next time this pane is shown. */
+    static String pendingProfileId;
+
     private static final LinkProbe.Phase[][] PRESETS = {
             {new LinkProbe.Phase(30, 200, 8), new LinkProbe.Phase(300, 1200, 8)},
             {new LinkProbe.Phase(30, 200, 30), new LinkProbe.Phase(300, 1200, 20)},
@@ -36,6 +41,8 @@ public class TestFragment extends Fragment {
     };
 
     private FragmentTestBinding b;
+    private String selectedId = "";
+    private final List<Store.Item> items = new ArrayList<>();
     private final Runnable listener = this::render;
 
     private SharedPreferences prefs() { return requireContext().getSharedPreferences("p", Context.MODE_PRIVATE); }
@@ -43,11 +50,9 @@ public class TestFragment extends Fragment {
     @Nullable @Override
     public View onCreateView(@NonNull LayoutInflater inf, @Nullable ViewGroup c, @Nullable Bundle s) {
         b = FragmentTestBinding.inflate(inf, c, false);
-        String host = prefs().getString("probe_host", "");
-        int port = prefs().getInt("probe_port", DEFAULT_PORT), preset = prefs().getInt("probe_preset", 0);
-        if (host.isEmpty()) host = defaultHost();
-        b.host.setText(host);
-        b.port.setText(String.valueOf(port));
+        int preset = prefs().getInt("probe_preset", 0);
+        loadProfiles();
+        b.profilePick.setOnItemClickListener((parent, v, pos, id) -> { selectedId = items.get(pos).id; prefs().edit().putString("probe_profile", selectedId).apply(); render(); });
         b.presets.check(preset == 1 ? R.id.pStandard : preset == 2 ? R.id.pThorough : R.id.pQuick);
         b.presets.setOnCheckedStateChangeListener((g, ids) -> { prefs().edit().putInt("probe_preset", preset()).apply(); renderPlan(); });
         b.start.setOnClickListener(v -> { if (ProbeRunner.running) ProbeRunner.stop(); else start(); });
@@ -57,21 +62,20 @@ public class TestFragment extends Fragment {
         });
         b.share.setOnClickListener(v -> startActivity(Intent.createChooser(
                 new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, exportText()), "Share results")));
-        b.host.addTextChangedListener(new android.text.TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence c, int a, int n, int d) { }
-            @Override public void onTextChanged(CharSequence c, int a, int n, int d) { }
-            @Override public void afterTextChanged(android.text.Editable e) { if (b != null && !ProbeRunner.running) b.start.setText(tunable() != null ? "Test and tune" : "Start test"); }
-        });
         b.tuneReset.setOnClickListener(v -> {
-            Store.Item it = Store.active(requireContext());
-            if (it != null) { Tuning.clear(requireContext(), it.id); TunnelService.retune(requireContext()); }
+            Store.Item it = selected();
+            if (it != null) {
+                Tuning.clear(requireContext(), it.id);
+                Store.Item act = Store.active(requireContext());
+                if (act != null && act.id.equals(it.id)) TunnelService.retune(requireContext());
+            }
             render();
         });
         renderPlan();
         return b.getRoot();
     }
 
-    @Override public void onStart() { super.onStart(); ProbeRunner.LISTENERS.add(listener); render(); }
+    @Override public void onStart() { super.onStart(); ProbeRunner.LISTENERS.add(listener); loadProfiles(); render(); }
 
     @Override public void onStop() {
         ProbeRunner.LISTENERS.remove(listener);
@@ -81,23 +85,33 @@ public class TestFragment extends Fragment {
 
     @Override public void onDestroyView() { b = null; super.onDestroyView(); }
 
-    /** The server of the active profile, without its port: that is where the probe service normally runs. */
-    private String defaultHost() {
-        Store.Item it = Store.active(requireContext());
-        Profile p = it == null ? null : it.parsed();
-        String s = p == null ? "" : p.server;
-        if (s.startsWith("[")) { int e = s.indexOf(']'); return e > 0 ? s.substring(1, e) : s; }
-        int i = s.lastIndexOf(':');
-        return i > 0 ? s.substring(0, i) : s;
+    /** The profile list for the picker; keeps the selection (asked for by another screen, else the last one, else the active one). */
+    private void loadProfiles() {
+        items.clear();
+        items.addAll(Store.list(requireContext()));
+        String want = pendingProfileId != null ? pendingProfileId : !selectedId.isEmpty() ? selectedId : prefs().getString("probe_profile", "");
+        pendingProfileId = null;
+        Store.Item act = Store.active(requireContext());
+        selectedId = "";
+        for (Store.Item it : items) if (it.id.equals(want)) selectedId = it.id;
+        if (selectedId.isEmpty() && act != null) selectedId = act.id;
+        List<String> names = new ArrayList<>();
+        for (Store.Item it : items) names.add(it.name);
+        if (b != null) {
+            b.profilePick.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, names));
+            Store.Item s = selected();
+            b.profilePick.setText(s == null ? "" : s.name, false);
+        }
     }
 
-    /** The active profile when it offers several FEC levels (the test then also picks the level). Whether the tested server is
-     *  really the profile's server is checked after the test, on the resolved addresses. */
-    private Store.Item tunable() {
-        if (b == null) return null;
-        Store.Item it = Store.active(requireContext());
-        Profile p = it == null ? null : it.parsed();
-        return p != null && p.hasTiers() ? it : null;
+    private Store.Item selected() {
+        for (Store.Item it : items) if (it.id.equals(selectedId)) return it;
+        return null;
+    }
+
+    private Profile selectedProfile() {
+        Store.Item it = selected();
+        return it == null ? null : it.parsed();
     }
 
     private int preset() {
@@ -115,26 +129,31 @@ public class TestFragment extends Fragment {
         }
         b.planText.setText(String.format(Locale.US, "%suses about %s of data in total and takes about %d s. Keep the app open.",
                 sb, Fmt.bytes(bytes), secs));
-        String t = defaultHost();
-        b.targetHint.setText(t.isEmpty()
-                ? "Enter the address of a server that runs the probe service (port " + DEFAULT_PORT + " by default)."
-                : "Starts from the active profile's server. The server must run the probe service, which listens on its own UDP port (" + DEFAULT_PORT + " by default).");
+    }
+
+    /** What the test will talk to, from the profile. */
+    private void renderTarget() {
+        Profile p = selectedProfile();
+        if (items.isEmpty()) { b.targetHint.setText("Add a profile first (Profiles tab)."); return; }
+        if (p == null) { b.targetHint.setText("This profile cannot be read."); return; }
+        String where = p.serverHost() + ":" + p.linkTestPort();
+        b.targetHint.setText(p.probePort > 0
+                ? "Tests UDP to " + where + ", the server and probe port this profile came with."
+                : "Tests UDP to " + where + ". This profile does not say which port the probe uses, so the default is tried; "
+                + "import its app string again from the admin page to store the right one.");
     }
 
     private void start() {
-        String host = String.valueOf(b.host.getText()).trim();
-        int port;
-        try { port = Integer.parseInt(String.valueOf(b.port.getText()).trim()); } catch (NumberFormatException e) { port = -1; }
-        if (host.isEmpty()) { b.host.setError("Enter a server"); return; }
-        if (port < 1 || port > 65535) { b.port.setError("1 to 65535"); return; }
-        prefs().edit().putString("probe_host", host).putInt("probe_port", port).putInt("probe_preset", preset()).apply();
+        Store.Item it = selected();
+        Profile p = it == null ? null : it.parsed();
+        if (it == null || p == null) { Toast.makeText(requireContext(), "Pick a profile first.", Toast.LENGTH_SHORT).show(); return; }
+        prefs().edit().putInt("probe_preset", preset()).apply();
         List<LinkProbe.Phase> plan = new ArrayList<>(Arrays.asList(PRESETS[preset()]));
-        Store.Item t = tunable();
-        ProbeRunner.start(requireContext(), host, port, plan, t == null ? null : t.id, t == null ? null : t.parsed());
+        ProbeRunner.start(requireContext(), it.id, it.name, p, plan);
     }
 
     private String exportText() {
-        return ProbeReport.export(ProbeRunner.host, ProbeRunner.port, ProbeRunner.results);
+        return ProbeReport.export(ProbeRunner.profileName, ProbeRunner.host, ProbeRunner.port, ProbeRunner.results);
     }
 
     private void keepAwake(boolean on) {
@@ -143,9 +162,9 @@ public class TestFragment extends Fragment {
         else getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
-    /** The card that says which FEC level the active profile uses. Only for profiles that have several levels. */
+    /** The card that says which FEC level the selected profile uses. Only for profiles that have several levels. */
     private void renderTune() {
-        Store.Item it = Store.active(requireContext());
+        Store.Item it = selected();
         Profile p = it == null ? null : it.parsed();
         if (p == null || !p.hasTiers()) { b.tuneCard.setVisibility(View.GONE); return; }
         Tuning.Choice c = Tuning.get(requireContext(), it.id);
@@ -154,8 +173,7 @@ public class TestFragment extends Fragment {
         StringBuilder levels = new StringBuilder();
         for (FecTuner.Tier t : p.tiers) levels.append(levels.length() == 0 ? "" : ", ").append(t.name);
         b.tuneText.setText(lab == null ? "Not tuned: using the profile's own settings." : "Using " + lab + ".");
-        b.tuneHint.setText((lab == null ? "" : "Set by a test " + Fmt.ago(c.at) + ". ") + "Levels: " + levels + ". \"Test and tune\" measures the link to " + defaultHost()
-                + " and picks the level for each direction itself.");
+        b.tuneHint.setText((lab == null ? "" : "Set by a test " + Fmt.ago(c.at) + ". ") + "Levels: " + levels + ". \"Test and tune\" measures this profile's link and picks the level for each direction itself.");
         b.tuneReset.setVisibility(lab == null ? View.GONE : View.VISIBLE);
     }
 
@@ -170,9 +188,12 @@ public class TestFragment extends Fragment {
         if (b == null) return;
         boolean running = ProbeRunner.running;
         keepAwake(running);
-        b.start.setText(running ? "Stop" : tunable() != null ? "Test and tune" : "Start test");
+        Profile p = selectedProfile();
+        b.start.setText(running ? "Stop" : p != null && p.hasTiers() ? "Test and tune" : "Start test");
+        b.start.setEnabled(running || p != null);
+        renderTarget();
         renderTune();
-        b.host.setEnabled(!running); b.port.setEnabled(!running);
+        b.profilePick.setEnabled(!running);
         for (int i = 0; i < b.presets.getChildCount(); i++) b.presets.getChildAt(i).setEnabled(!running);
         b.progress.setVisibility(running ? View.VISIBLE : View.GONE);
         b.status.setVisibility(running || ProbeRunner.error != null ? View.VISIBLE : View.GONE);
@@ -183,7 +204,7 @@ public class TestFragment extends Fragment {
             String what = "sending".equals(ProbeRunner.stage) ? "Sending" : "waiting".equals(ProbeRunner.stage) ? "Waiting for late packets"
                     : "collecting".equals(ProbeRunner.stage) ? "Asking the server what it received" : "Starting";
             b.status.setTextColor(com.google.android.material.color.MaterialColors.getColor(b.status, com.google.android.material.R.attr.colorOnSurface));
-            b.status.setText(String.format(Locale.US, "Phase %d of %d: %s  (%d / %d sent, %d echoed)",
+            b.status.setText(String.format(Locale.US, "%s, phase %d of %d: %s  (%d / %d sent, %d echoed)", ProbeRunner.profileName,
                     Math.max(1, ProbeRunner.phase), ProbeRunner.phases, what, ProbeRunner.sent, ProbeRunner.total, ProbeRunner.echoes));
         } else if (ProbeRunner.error != null) {
             b.status.setTextColor(b.status.getContext().getColor(R.color.status_err));
@@ -192,9 +213,10 @@ public class TestFragment extends Fragment {
 
         b.results.removeAllViews();
         List<LinkProbe.Result> rs = ProbeRunner.results;
-        for (int i = 0; i < rs.size(); i++) card("Phase " + (i + 1) + ":  " + ProbeReport.title(rs.get(i)), ProbeReport.body(rs.get(i)));
+        String who = ProbeRunner.profileName.isEmpty() ? "" : ProbeRunner.profileName + " · ";
+        for (int i = 0; i < rs.size(); i++) card(who + "Phase " + (i + 1) + ":  " + ProbeReport.title(rs.get(i)), ProbeReport.body(rs.get(i)));
         if (!rs.isEmpty() && !running) {
-            card("Verdict", ProbeReport.verdict(rs));
+            card(who + "Verdict", ProbeReport.verdict(rs));
             if (ProbeRunner.tuneMsg != null) card("FEC level", ProbeRunner.tuneMsg);
         }
         b.actions.setVisibility(rs.isEmpty() ? View.GONE : View.VISIBLE);

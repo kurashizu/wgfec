@@ -13,7 +13,8 @@ import java.util.zip.InflaterInputStream;
  *   wgfec://1/<base64url(JSON)>          plain
  *   wgfec://1z/<base64url(zlib(JSON))>   compressed
  * JSON: {"v":1, "name":"...", "wg":"<WireGuard config>", "sp":"<speederv2 client command>" (absent = direct tunnel),
- *        "tiers":[{n,l,p,u,t,i,d,s}, ...] (optional: the server's FEC levels, weakest first)}
+ *        "tiers":[{n,l,p,u,t,i,d,s}, ...] (optional: the server's FEC levels, weakest first),
+ *        "probe":62933 (optional: UDP port of the server's link-test probe)}
  */
 final class AppString {
     static final String SCHEME = "wgfec://";
@@ -49,6 +50,8 @@ final class AppString {
         String sp = o.optString("sp", "");
         StringBuilder t = new StringBuilder(wg.trim()).append('\n');
         if (!sp.isEmpty()) t.append('\n').append(sp.trim()).append('\n');
+        int probe = o.optInt("probe", 0);
+        if (probe >= 1 && probe <= 65535) t.append(Profile.PROBE_PREFIX).append(' ').append(probe).append('\n');
         org.json.JSONArray tiers = o.optJSONArray("tiers");
         if (!sp.isEmpty() && tiers != null && tiers.length() > 0) t.append(Profile.TIERS_PREFIX).append(' ').append(tiers.toString()).append('\n');
         String name = o.optString("name", "").replaceAll("[^\\w .@-]", "");

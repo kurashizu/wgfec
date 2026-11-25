@@ -395,7 +395,7 @@
 
   // ---------- app string for the Android app "WG FEC" ----------
   // Link format: wgfec://1/<base64url(JSON)>  or  wgfec://1z/<base64url(zlib(JSON))> (used when the browser can compress).
-  // JSON: {"v":1,"name":"...","wg":"<WireGuard config>","sp":"<speederv2 client command>","tiers":[...]}; "sp" is absent for a direct tunnel.
+  // JSON: {"v":1,"name":"...","wg":"<WireGuard config>","sp":"<speederv2 client command>","tiers":[...],"probe":62933}; "sp" is absent for a direct tunnel.
   // "tiers" (optional): the FEC levels of the server, weakest first: {n: name, l: loss it is for (%), p: server UDP port, u/t/i: uplink FEC table, wait, interleave, d/s: decode / socket buffer}.
   function b64url(bytes) {
     var s = '';
@@ -407,6 +407,7 @@
     var c = d.cmds || {};
     var sp = c.speeder || d.speeder_cmd;
     if (typeof sp === 'string' && sp) o.sp = sp;
+    if (typeof d.probe === 'number') o.probe = d.probe;                                // UDP port of the server's link-test probe
     if (sp && Array.isArray(d.tiers) && d.tiers.length) o.tiers = d.tiers;       // FEC levels the app can switch between
     var raw = new TextEncoder().encode(JSON.stringify(o));
     var plain = 'wgfec://1/' + b64url(raw);
@@ -696,6 +697,8 @@
         spd.appendChild(kvx('Uplink (device to server)', (d.fec_up || d.fec) + ' · max wait ' + (d.timeout_up != null ? d.timeout_up : d.timeout) + ' ms · interleave ' + (d.interval_up != null ? d.interval_up : d.interval) + ' ms'));
       }
       if (d.fec_mtu) spd.appendChild(kvx('Max packet size', d.fec_mtu + ' B'));
+      if (d.probe) spd.appendChild(el('div', { class: 'kv' }, [el('div', { class: 'k', text: 'Link-test probe' }),
+        el('div', { class: 'v' }, [badge(d.probe.state === 'active' ? 'ok' : 'bad', d.probe.state === 'active' ? 'Running' : d.probe.state), document.createTextNode('  UDP ' + d.probe.port + ' · what the app\'s Link test measures')])]));
     });
     api('GET', '/api/config').then(function (r) {
       cfgPre.textContent = r.ok ? r.data.config : (r.data.error || 'Cannot load config');

@@ -18,7 +18,7 @@ final class ProbeRunner {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
 
     static volatile boolean running;
-    static volatile String host = "", stage = "";
+    static volatile String host = "", stage = "", profileName = "";
     static volatile int port, phase, phases, sent, total, echoes;
     static volatile String error;
     /** What the last test switched the FEC level to, or why it did not. Null when the test was not meant to tune. */
@@ -28,11 +28,13 @@ final class ProbeRunner {
     private static LinkProbe probe;
 
     /** Runs a test. With a profile (and its id), the FEC level of that profile is chosen from the result and applied. */
-    static synchronized boolean start(Context ctx, String h, int p, List<LinkProbe.Phase> plan, String tuneId, Profile tuneProfile) {
+    static synchronized boolean start(Context ctx, String profileId, String name, Profile profile, List<LinkProbe.Phase> plan) {
         if (running) return false;
         Context app = ctx.getApplicationContext();
         running = true; cancelled = false; error = null; tuneMsg = null; results = new ArrayList<>();
-        host = h; port = p; phase = 0; phases = plan.size(); sent = total = echoes = 0; stage = "starting";
+        String h = profile.serverHost();
+        int p = profile.linkTestPort();
+        host = h; port = p; profileName = name; phase = 0; phases = plan.size(); sent = total = echoes = 0; stage = "starting";
         LinkProbe lp = probe = new LinkProbe();
         Thread t = new Thread(() -> {
             try {
@@ -53,7 +55,7 @@ final class ProbeRunner {
             } catch (Exception e) {
                 error = e.getMessage() != null ? e.getMessage() : e.toString();
             } finally {
-                if (tuneId != null && !cancelled && error == null && !results.isEmpty()) tune(app, tuneId, tuneProfile, h);
+                if (profile.hasTiers() && !cancelled && error == null && !results.isEmpty()) tune(app, profileId, profile);
                 running = false;
                 changed();
             }
@@ -64,26 +66,15 @@ final class ProbeRunner {
         return true;
     }
 
-    private static String hostOf(String hostPort) {
-        if (hostPort.startsWith("[")) { int e = hostPort.indexOf(']'); return e > 0 ? hostPort.substring(1, e) : hostPort; }
-        int i = hostPort.lastIndexOf(':');
-        return i > 0 ? hostPort.substring(0, i) : hostPort;
-    }
-
-    private static void tune(Context ctx, String id, Profile p, String testedHost) {
+    private static void tune(Context ctx, String id, Profile p) {
         List<LinkProbe.Result> rs = results;
-        try {   // the result only describes this profile's path if both names are the same server
-            if (!LinkProbe.resolve(testedHost).equals(LinkProbe.resolve(hostOf(p.server)))) {
-                tuneMsg = "The FEC level was not changed: the tested server is not the profile's server (" + hostOf(p.server) + ").";
-                return;
-            }
-        } catch (java.io.IOException e) { tuneMsg = "The FEC level was not changed: could not resolve the profile's server."; return; }
         if (!ProbeReport.measured(rs)) { tuneMsg = "The FEC level was not changed: the server's record did not arrive, so the two directions could not be told apart."; return; }
         double lu = ProbeReport.lossOf(rs, true), ld = ProbeReport.lossOf(rs, false);
         int up = FecTuner.pick(p.tiers, lu, ProbeReport.burstyDir(rs, true)), down = FecTuner.pick(p.tiers, ld, ProbeReport.burstyDir(rs, false));
         if (up < 0 || down < 0) return;
         Tuning.set(ctx, id, up, down);
-        boolean live = TunnelService.running();
+        Store.Item act = Store.active(ctx);
+        boolean live = TunnelService.running() && act != null && act.id.equals(id);      // only the profile that is connected restarts its helper
         if (live) TunnelService.retune(ctx);
         tuneMsg = String.format(java.util.Locale.US, "Switched to downlink %s (measured %.2f %%) and uplink %s (measured %.2f %%).%s",
                 p.tiers.get(down).name, ld, p.tiers.get(up).name, lu, live ? " The FEC helper was restarted with the new settings; the tunnel stayed up." : " It applies the next time you connect.");
