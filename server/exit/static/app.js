@@ -408,6 +408,23 @@
     return new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer()
       .then(function (buf) { var z = 'wgfec://1z/' + b64url(new Uint8Array(buf)); return z.length < plain.length ? z : plain; }, function () { return plain; });
   }
+  // ---------- pick a FEC level for a device's client command ----------
+  // The same rewrite the Android app does (FecTuner.applyTiers): the level's server port (the downlink strength) and the
+  // level's uplink settings. t = one entry of "tiers": {n: name, l: loss %, p: port, u/t/i: uplink FEC table, wait, interleave, d/s: buffers}.
+  function setLong(c, flag, val) {
+    var re = new RegExp('(^|\\s)' + flag.replace(/-/g, '\\-') + '\\s+\\S+');
+    if (re.test(c)) return c.replace(re, function (m, sp) { return sp + flag + ' ' + val; });
+    return c.replace(/(\s--report\s\S+)?$/, function (m) { return ' ' + flag + ' ' + val + m; });
+  }
+  function applyTier(cmd, t) {
+    if (!cmd || !t) return cmd;
+    var c = cmd.replace(/(^|\s)-r\s?([^\s:]+):\d+/, function (m, sp, host) { return sp + '-r' + host + ':' + t.p; });
+    c = c.replace(/(^|\s)-f\s?\S+/, function (m, sp) { return sp + '-f' + t.u; });
+    c = setLong(c, '--timeout', t.t);
+    c = setLong(c, '-i', t.i);
+    c = setLong(c, '--decode-buf', t.d);
+    return setLong(c, '--sock-buf', t.s);
+  }
   function showConfig(d, created) {
     var curVia = d.qd ? 'quic' : d.via || (d.speeder ? 'speeder' : 'direct');
     var img = el('img', { class: 'qr', alt: 'QR code of the client config' });
@@ -430,7 +447,30 @@
     else head = el('div', { class: 'msg warn', text: 'This config contains the device\'s private key. Keep it private. Address: ' + d.ip });
     var qnote = d.qd ? el('div', { class: 'msg', text: 'FEC over QUIC: the Android app sends the FEC tunnel to UDP ' + (d.quic ? d.quic.p : '') + ' as QUIC-looking packets; use the app string below (it switches the disguise on). The config and command for a computer are the same as for FEC, because only the app can do the disguise.' }) : null;
     var sw = el('div', { class: 'row' });
-    var m = openModal(created ? 'Device "' + d.name + '" created' : 'Device "' + d.name + '"', [head, sw].concat(qnote ? [qnote] : []).concat([img, el('pre', { text: d.config })]).concat([
+    // the line under "Config for:": the FEC level (only for the FEC types, when the server has levels)
+    var tiers = (Array.isArray(d.tiers) && d.tiers.length) ? d.tiers : null;
+    var lvNodes = [];
+    var m;
+    if (tiers) {
+      if (!d.base) d.base = { speeder: (d.cmds && d.cmds.speeder) || d.speeder_cmd };       // the command as the server built it
+      var curLv = typeof d.lvl === 'number' ? d.lvl : -1;
+      var lvRow = el('div', { class: 'row' }, [el('span', { class: 'muted', text: 'FEC level:' })]);
+      [[-1, 'Server default']].concat(tiers.map(function (t, i) { return [i, t.n + ' \u00b7 ' + t.l + '%']; })).forEach(function (o) {
+        var b = el('button', { class: 'btn slim' + (o[0] === curLv ? ' on' : ''), type: 'button', text: o[1], 'aria-pressed': o[0] === curLv ? 'true' : 'false' });
+        if (o[0] !== curLv) b.addEventListener('click', function () {
+          var cm = Object.assign({}, d.cmds || { speeder: d.speeder_cmd });
+          cm.speeder = o[0] < 0 ? d.base.speeder : applyTier(d.base.speeder, tiers[o[0]]);
+          var d2 = Object.assign({}, d, { cmds: cm, speeder_cmd: cm.speeder, lvl: o[0] });
+          m.close(); showConfig(d2, created);                // the command, the setup steps and the app string follow the level
+        });
+        lvRow.appendChild(b);
+      });
+      var lt = curLv >= 0 ? tiers[curLv] : null;
+      lvNodes = [lvRow, el('div', { class: 'muted', text: lt
+        ? lt.n + ': downlink on UDP ' + lt.p + ', uplink -f ' + lt.u + ' (wait ' + lt.t + ' ms), for up to about ' + lt.l + '% loss. The command and the app string below use it.'
+        : 'The server\'s default level. Pick a level to build the command and the app string for it (the Android app can still switch levels itself).' })];
+    }
+    m = openModal(created ? 'Device "' + d.name + '" created' : 'Device "' + d.name + '"', [head, sw].concat(lvNodes).concat(qnote ? [qnote] : []).concat([img, el('pre', { text: d.config })]).concat([
       setupGuide(d.cmds || d.speeder_cmd || null, d.name + '.conf', d)
     ]).concat([
       el('div', { class: 'row end' }, [dl, copyBtn, el('button', { class: 'btn', text: 'Close', onclick: function () { m.close(); } })])
@@ -493,9 +533,9 @@
     { id: 'conservative', name: 'Conservative', loss: '40%',
       down: '1:6,2:8,3:10,5:13,8:16,12:21,16:25,24:33,32:41,48:55,64:69', td: 30, id_: 5, up: '1:1,2:2,4:2,8:3,16:5,32:8', tu: 10, iu: 0, db: 6000, sb: 2048,
       note: 'For very lossy links (up to about 40%). Roughly 2 to 7 times the traffic.' },
-    { id: 'maximum', name: 'Maximum', loss: '55%',
-      down: '1:10,2:13,3:16,5:21,8:28,12:36,16:43,24:57,32:70,48:96,64:121,80:145', td: 40, id_: 5, up: '1:2,2:2,4:3,8:4,16:6,32:9', tu: 10, iu: 0, db: 12000, sb: 4096,
-      note: 'Worst case (up to about 55% loss). Most protection, 3 to 11 times the traffic, about 40 to 60 ms extra delay.' }
+    { id: 'maximum', name: 'Maximum', loss: '68%',
+      down: '1:23,2:29,3:34,5:43,8:55,12:70,16:83,24:109,32:133,40:156,48:178', td: 70, id_: 20, up: '1:2,2:2,4:3,8:4,16:6,32:9', tu: 10, iu: 0, db: 12000, sb: 4096,
+      note: 'Worst case (up to about 68% random loss, residual loss about 0.01% or less). Most protection: 4.7 to 24 times the traffic on the downlink, up to about 90 ms extra delay (70 ms wait + 20 ms interleave). Needs server CPU for the big groups. Built for lines that drop packets at random, such as an international downlink at 50-65%; it does not repair long bursts.' }
   ];
   var LOGF = [0];
   for (var li = 1; li <= 260; li++) LOGF.push(LOGF[li - 1] + Math.log(li));
@@ -642,6 +682,8 @@
         var n = {};
         ['td', 'id_', 'tu', 'iu', 'db', 'sb'].forEach(function (k) { if (!/^[0-9]{1,6}$/.test(f[k])) bad = l.name + ': numbers only in the time, size and buffer fields.'; else n[k] = parseInt(f[k], 10); });
         body.levels[l.id] = { down: { fec: f.down, timeout: n.td, interval: n.id_ }, up: { fec: f.up, timeout: n.tu, interval: n.iu }, db: n.db, sb: n.sb };
+        var psl = presetOf(l.id);                         // keep the "meant for up to N%" label in step with the preset the values came from
+        if (psl && parseInt(psl.loss, 10) !== l.loss) body.levels[l.id].loss = parseInt(psl.loss, 10);
       });
       if (!bad && !/^[0-9]{3,4}$/.test(mtu)) bad = 'Max packet size: a number of bytes.';
       if (bad) { msg.appendChild(el('div', { class: 'msg bad', text: bad })); return; }

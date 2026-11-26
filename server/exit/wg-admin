@@ -172,7 +172,7 @@ PRESETS = [
     ("balanced", "Balanced", 25, ("1:3,2:5,4:6,8:9,16:14,32:22,48:30", 20, 2), ("1:1,2:1,4:1,8:2,16:3,32:5", 10, 0), 2000, 1024),
     ("conservative", "Conservative", 40, ("1:6,2:8,3:10,5:13,8:16,12:21,16:25,24:33,32:41,48:55,64:69", 30, 5),
      ("1:1,2:2,4:2,8:3,16:5,32:8", 10, 0), 6000, 2048),
-    ("maximum", "Maximum", 55, ("1:10,2:13,3:16,5:21,8:28,12:36,16:43,24:57,32:70,48:96,64:121,80:145", 40, 5),
+    ("maximum", "Maximum", 68, ("1:23,2:29,3:34,5:43,8:55,12:70,16:83,24:109,32:133,40:156,48:178", 70, 20),
      ("1:2,2:2,4:3,8:4,16:6,32:9", 10, 0), 12000, 4096),
 ]
 LEVEL_IDS = tuple(p[0] for p in PRESETS) + ("custom",)
@@ -327,7 +327,8 @@ def cmd_levels_init():
 
 def cmd_levels_set(arg):
     """Change level definitions, the default level and/or the packet size. Argument: base64 of a JSON request
-    {"default": id, "mtu": n, "levels": {id: {"down": {fec,timeout,interval}, "up": {...}, "db": n, "sb": n}}}."""
+    {"default": id, "mtu": n, "levels": {id: {"down": {fec,timeout,interval}, "up": {...}, "db": n, "sb": n, "loss": n}}}.
+    "loss" (1-100, automatic levels only) is the link loss the level is meant for, as shown to the app and the admin page."""
     import base64
     if not arg or len(arg) > 30000:
         raise Err("invalid request")
@@ -346,7 +347,7 @@ def cmd_levels_set(arg):
     if not isinstance(patches, dict):
         raise Err("invalid request")
     for lid, patch in patches.items():
-        if lid not in by_id or not isinstance(patch, dict) or set(patch) - {"down", "up", "db", "sb"}:
+        if lid not in by_id or not isinstance(patch, dict) or set(patch) - {"down", "up", "db", "sb", "loss"}:
             raise Err("unknown level or setting")
         cur = by_id[lid]
         new = json.loads(json.dumps(cur))
@@ -361,6 +362,10 @@ def cmd_levels_set(arg):
             new["db"] = int(_int_in(300, 20000)(str(patch["db"])))
         if "sb" in patch:
             new["sb"] = int(_int_in(10, 10240)(str(patch["sb"])))
+        if "loss" in patch:
+            if not cur.get("auto"):
+                raise Err("the custom level has no loss to set")
+            new["loss"] = int(_int_in(1, 100)(str(patch["loss"])))
         if new != cur:
             by_id[lid] = new
             changed.append(lid)

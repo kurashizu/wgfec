@@ -20,14 +20,15 @@ seen by applications down to about 1% in our tests (see [docs/findings.md](docs/
 | `server/scripts/` | `configure.sh` (set your public host), `deploy.sh` (install on a server), `install-levels.sh` (start one FEC service per level). |
 | `android/` | The **WG FEC** app: WireGuard (wireguard-go, from the official tunnel library) plus a bundled `speederv2`. |
 | `tools/net-probe/` | UDP loss/latency probe (server and command line client; the Android app has the same test in its Debug tab). |
-| `docs/` | Architecture, server setup, the app-string format, port forwarding, the QUIC disguise, test findings. |
+| `tools/fectest.py`, `tools/fec_design.py` | One-run loss, rate-limit and FEC-tuning test of a line (see [docs/loss-test.md](docs/loss-test.md)), and the calculator for FEC tier tables. |
+| `docs/` | Architecture, server setup, the app-string format, port forwarding, the QUIC disguise, the loss test and the Maximum level, test findings. |
 
 ## Features
 
 - **Web admin** (English, password protected, listens on localhost only): create devices, show configs, per-device
   connection type, edit the FEC levels and the default level, view logs, service control.
 - **Two connection types per device:** direct WireGuard, or WireGuard over FEC.
-- **FEC levels:** five ready-made levels (from about 3% to about 55% link loss), each on its own UDP port; you choose them per direction in the app, and its link test suggests one.
+- **FEC levels:** five ready-made levels (from about 3% to about 68% link loss; the top one, Maximum, is built from a measured 55-65% random downlink loss, see [docs/loss-test.md](docs/loss-test.md)), each on its own UDP port; you choose them per direction in the app, and its link test suggests one.
 - **Port forwarding** on the hub: publish a TCP/UDP port to any WireGuard device, or to an address on a LAN behind a device.
 - **Android app** (Android 8+): works with FEC profiles and with plain WireGuard profiles; profiles, one-tap connect, notification and quick-settings tile, traffic and handshake
   stats, log viewer. Import with one copy and paste of an **app string** from the admin page.

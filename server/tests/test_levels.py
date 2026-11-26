@@ -36,6 +36,8 @@ ok(open(m.LEVEL_ENV % "balanced").read().count("LEVEL_FEC=1:4,2:6") == 1 and "LE
 restarts = [c[1] for c in calls if c[0] == "restart"]
 ok(restarts == ["wg-speeder-level@balanced.service"], "set: restarted only that level, not the main service: %s" % restarts)
 ok("1:4,2:6" in open(m.LEVELS_FILE).read(), "set: levels.json updated")
+r = m.cmd_levels_set(req(levels={"maximum": {"loss": 60}}))
+ok(r["changed"] == ["maximum"] and '"loss": 60' in open(m.LEVELS_FILE).read(), "set: the loss label of a preset level")
 
 calls.clear(); r = m.cmd_levels_set(req(default="light"))
 e = open(m.SPEEDER_ENV).read()
@@ -48,7 +50,7 @@ calls.clear(); m.cmd_levels_set(req(mtu=1200))
 ok("SPEEDER_MTU=1200" in open(m.SPEEDER_ENV).read(), "mtu: written to main env")
 ok(len([c for c in calls if c[0] == "restart" and "level@" in c[1]]) == 5, "mtu: all 5 level instances restarted")
 
-for bad_req, what in [(req(levels={"light": {"down": {"fec": "3:1,2:1"}}}), "decreasing data"), (req(levels={"nope": {}}), "unknown level"),
+for bad_req, what in [(req(levels={"light": {"down": {"fec": "3:1,2:1"}}}), "decreasing data"), (req(levels={"nope": {}}), "unknown level"), (req(levels={"custom": {"loss": 5}}), "loss on the custom level"), (req(levels={"light": {"loss": 0}}), "loss out of range"),
                       (req(levels={"light": {"db": 5}}), "buffer out of range"), (req(default="x"), "unknown default"), ("%%%", "garbage")]:
     try: m.cmd_levels_set(bad_req); ok(False, "reject " + what)
     except m.Err: ok(True, "reject " + what)
